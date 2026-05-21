@@ -68,12 +68,13 @@ func TestRegisterAndUnregister(t *testing.T) {
 		t.Fatalf("Register failed: %v", err)
 	}
 
-	// Duplicate registration should fail
+	// Duplicate registration is now idempotent (re-attaches the closure / refreshes
+	// the schedule) rather than an error.
 	err = convJob.Register(ctx, testTenant, "test-job", time.Now().Add(1*time.Hour), 5*time.Minute, func(convCtx.Context) error {
 		return nil
 	})
-	if err == nil {
-		t.Fatal("expected error on duplicate Register")
+	if err != nil {
+		t.Fatalf("duplicate Register should be idempotent, got: %v", err)
 	}
 
 	err = convJob.Unregister(ctx, testTenant, "test-job")

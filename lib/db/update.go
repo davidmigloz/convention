@@ -13,6 +13,9 @@ var (
 	ErrObjectNotFound   = errors.New("convention/db: object not found")
 	ErrLockNotAvailable = errors.New("convention/db: row lock not available")
 	ErrCASConflict      = errors.New("convention/db: object modified since read")
+	// ErrLeaseLost is returned by a lease lock's Renew/Unlock when the row is no
+	// longer owned by this holder (it expired and was stolen, or was force-cleared).
+	ErrLeaseLost = errors.New("convention/db: lock lease lost")
 )
 
 // sqlStateProvider is implemented by both lib/pq.Error and pgx-style PgError,

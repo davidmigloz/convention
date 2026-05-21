@@ -53,6 +53,16 @@ var (
 
 All package state is global. The package is designed as a singleton scheduler -- only one `Initialise` call is allowed at a time.
 
+In addition, the package holds lease tuning and the per-process owner token:
+
+```go
+var (
+    jobLease         = 90 * time.Second   // a lock not renewed within this is stealable
+    jobRenewInterval = 30 * time.Second   // heartbeat cadence (≈ lease/3)
+)
+var ownerToken string                     // per-process UUID, set in Initialise
+```
+
 ## Public API
 
 ### Initialise (job.go:133-149)
@@ -64,9 +74,10 @@ func Initialise(ctx convCtx.Context, vault convDB.Vault) error
 1. Acquires mutex
 2. Fails if already running (`cancel != nil`)
 3. Creates `jobsDB` via `convDB.NewObjectSet`
-4. Creates `wakeUp` channel (buffered, capacity 1)
-5. Creates cancellable context from provided context
-6. Launches `background()` goroutine
+4. Generates `ownerToken` (a per-process UUID used to tag lock ownership for the heartbeat lease)
+5. Creates `wakeUp` channel (buffered, capacity 1)
+6. Creates cancellable context from provided context
+7. Launches `background()` goroutine
 
 ### Register (job.go:42-91)
 
@@ -75,12 +86,12 @@ func Register(ctx convCtx.Context, tenant convAuth.Tenant, jid JobID, startAt ti
 ```
 
 1. Fails if `jobsDB == nil` (not initialised)
-2. Fails if job ID already exists in memory for tenant
-3. Checks database for existing job (`SelectByID`)
-4. If not in DB: creates new job and inserts
-5. If in DB: attaches the function and updates schedule parameters
-6. Stores in in-memory map
-7. Sends a non-blocking signal on `wakeUp` channel to wake the background loop
+2. **Idempotent re-registration**: if the job ID already exists in memory — including a nil-closure entry that `syncJobsFromDB` injected before this `Register` ran — it re-attaches the closure and refreshes the interval instead of returning "already exists". Callers therefore never need an Unregister+retry workaround for the sync race.
+3. Reads any persisted job (`SelectByID`); when a DB row exists its persisted `NextRunAt` is kept as the schedule, so a redeploy does not reset every job's clock to "now + startAt". `startAt` is only used for brand-new jobs.
+4. If not in DB: creates a new job and inserts
+5. Persists a changed `RepeatEvery` (the pre-fix code updated it in memory only, which the next `syncJobsFromDB` then reverted)
+6. Stores in the in-memory map
+7. Sends a non-blocking signal on `wakeUp` (via `wake()`) to wake the background loop
 
 ### Unregister (job.go:93-116)
 
@@ -172,14 +183,17 @@ func executeJob(ctx convCtx.Context, tenant convAuth.Tenant, j job)
 Execution flow:
 
 1. **Guard**: Skip if `RepeatEvery <= 0` (prevents infinite loop in schedule advancement)
-2. **Lock**: `jobsDB.Tenant(tenant).Lock(ctx, j, ...)` -- non-blocking. If `lock == nil`, another instance holds it; skip silently.
-3. **Defer unlock**: `lock.Unlock()` is deferred immediately after acquisition
-4. **Execute**: Run `j.f(ctx)` inside a nested func with `recover()` for panic safety. Errors and panics are logged.
-5. **Advance schedule**: Compute `nextRunAt = NextRunAt + RepeatEvery`, advancing past any missed intervals via a `for` loop
-6. **Update memory**: Acquire mutex, update `NextRunAt` in the in-memory map
-7. **Update database**: Call `jobsDB.Tenant(tenant).Update(ctx, updatedJob)` to persist the new schedule
+2. **Acquire (heartbeat lease)**: `jobsDB.Tenant(tenant).Lock(ctx, j, "executing job <id> @ <ownerToken>", convDB.WithLease(jobLease))`. If `lock == nil`, a live lock is held by another instance — skip, but **log at Info** (no longer silent, so a genuinely stuck job is visible). If `lock.Stolen()`, log a Warn with `lock.PreviousOwner()` (the prior holder crashed without unlocking).
+3. **Cancellable job context**: copy the `convCtx.Context` and replace its embedded `context.Context` with a cancellable child (`jobCtx`). `j.f` receives `jobCtx` so a job that honours cancellation aborts on lease loss.
+4. **Heartbeat goroutine**: every `jobRenewInterval`, call `lock.Renew(jobCtx)`. On `ErrLeaseLost` (classified by `renewOutcome`) set `leaseLost` and `jobCancel()`; on a **transient** error, log and keep retrying (do NOT drop a live lease for a DB blip).
+5. **Teardown defer**: `jobCancel()` then `<-hbDone` (join — leak-free because `Renew` uses `ExecContext`, so the cancel interrupts an in-flight renew), then owner-safe `lock.Unlock()` (an `ErrLeaseLost` here is a Warn, meaning the lock was stolen mid-run).
+6. **Execute**: Run `j.f(jobCtx)` inside a nested func with `recover()`.
+7. **Gate on lease ownership**: if `leaseLost`, **return without advancing/persisting `NextRunAt`** — the new owner is now responsible for scheduling.
+8. **Advance schedule** (only when the lease was held throughout): `nextRunAt = NextRunAt + RepeatEvery`, advancing past missed intervals; update the in-memory map (under mutex) and persist via `Update`.
 
-**Error policy**: `NextRunAt` is advanced even when the job function returns an error. This prevents a permanently failing job from retrying in a tight loop. The error is logged for observability.
+**Error policy**: `NextRunAt` is advanced even when the job function returns an error (a permanently failing job must not retry in a tight loop) — but NOT when the lease was lost mid-run.
+
+**Heartbeat lease (why)**: the lock is acquired with a TTL lease and renewed while the job runs, so a holder that crashes without unlocking is reclaimable (its lock is stolen once stale) instead of orphaning the job forever. `jobLease`/`jobRenewInterval` are package vars (default 90s / 30s = 3 heartbeats per lease window). `jobLease` need not exceed job runtime — the heartbeat keeps long jobs (e.g. minutes-long reconciliations) alive; it only bounds how long a crashed holder blocks others. The steal comparison assumes pod clocks are NTP-synced within a few seconds. `ownerToken` is a per-process UUID set in `Initialise`; it tags the lock's `description` so Renew/Unlock are owner-safe.
 
 ## Database Interaction
 
@@ -199,24 +213,27 @@ The `convDB.NewObjectSet[job, JobID, JobID](vault).Ready()` call creates three t
 | `SelectByID` | `Register` | Check if job already exists in DB |
 | `Insert` | `Register` | Persist new job |
 | `Delete` | `Unregister` | Remove job from DB |
-| `Lock` | `executeJob` | Acquire execution lock |
-| `Unlock` | `executeJob` | Release execution lock |
+| `Lock` (`WithLease`) | `executeJob` | Acquire execution lock with a heartbeat lease |
+| `Renew` | `executeJob` heartbeat | Refresh the lease while the job runs |
+| `Unlock` | `executeJob` | Release execution lock (owner-safe) |
 | `Update` | `executeJob` | Persist updated `NextRunAt` |
 
 ### Lock Mechanism
 
-Uses `convDB` pessimistic locking ([lock.go](../db/lock.go)):
+The scheduler uses `convDB`'s **heartbeat-lease** lock mode ([lock.go](../db/lock.go)) via `Lock(..., convDB.WithLease(jobLease))`:
 
 ```sql
-INSERT INTO "job_lock" ("id","created_at","description")
+INSERT INTO "job_lock" AS l ("id","created_at","description")
 VALUES($1,$2,$3)
-ON CONFLICT ("id") DO NOTHING;
+ON CONFLICT ("id") DO UPDATE SET "created_at"=$2, "description"=$3
+WHERE l."created_at" < $4;     -- $4 = now - lease  (a stale lock is stolen)
 ```
 
 - Non-blocking: returns immediately
-- `RowsAffected == 1` means lock acquired
-- `RowsAffected == 0` means another instance holds the lock
-- Lock persists until `DELETE FROM "job_lock" WHERE "id"=$1`
+- `RowsAffected == 1` means the lock was acquired, or a stale one was stolen
+- `RowsAffected == 0` means a live (recently-renewed) lock is held by another instance
+- `created_at` doubles as the heartbeat timestamp; `Renew` advances it; `Unlock` is owner-safe (`WHERE "id"=$1 AND "description"=$2`) and never removes a lock stolen away after expiry
+- The plain `ON CONFLICT DO NOTHING` mode (no `WithLease`) is unchanged and still used by non-job callers that want a sticky, never-stolen mutex
 
 ## Concurrency Model
 
@@ -240,7 +257,7 @@ Database locks (not the in-memory mutex) provide cross-instance mutual exclusion
 1. **Tenant discovery is local**: Only tenants with at least one locally registered job are synced from the database.
 2. **Sequential job execution**: Due jobs within a single loop iteration are executed sequentially, not in parallel.
 3. **Mutex held during DB sync**: `syncJobsFromDB` holds the mutex while calling `SelectAll`, which blocks `Register`/`Unregister` during sync. For small job counts this is acceptable.
-4. **No job execution timeout**: Job functions can run indefinitely. The context has cancellation but no deadline per job.
+4. **No job execution timeout**: Job functions can run indefinitely. They now receive a context that is cancelled on lease loss, but there is still no per-job deadline; a job that ignores cancellation keeps running. Its scheduling is still gated (a lost-lease run does not advance `NextRunAt`), so the worst case is at-most-once extra side effects, not a corrupted schedule.
 5. **`JobState` type is unused**: Defined but not referenced anywhere.
 
 ## Common Modification Scenarios
