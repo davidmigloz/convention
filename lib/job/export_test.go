@@ -65,6 +65,18 @@ func ReadJobRowNextRunForTest(ctx convCtx.Context, tenant convAuth.Tenant, jid J
 	return sj.NextRunAt, true, nil
 }
 
+// ReadJobRowForTest reads the persisted schedule (next_run_at + repeat_every) for a job.
+func ReadJobRowForTest(ctx convCtx.Context, tenant convAuth.Tenant, jid JobID) (nextRunAt time.Time, repeatEvery time.Duration, ok bool, err error) {
+	sj, err := jobsDB.Tenant(tenant).SelectByID(ctx, jid)
+	if err != nil {
+		return time.Time{}, 0, false, err
+	}
+	if sj == nil {
+		return time.Time{}, 0, false, nil
+	}
+	return sj.NextRunAt, sj.RepeatEvery, true, nil
+}
+
 // StealJobLockForTest forcibly takes the execution lock for jid as a foreign
 // owner. A far-future Now() makes the steal succeed regardless of the current
 // holder's heartbeat, simulating a competing instance taking over.

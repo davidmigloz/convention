@@ -87,10 +87,10 @@ func Register(ctx convCtx.Context, tenant convAuth.Tenant, jid JobID, startAt ti
 
 1. Fails if `jobsDB == nil` (not initialised)
 2. **Idempotent re-registration**: if the job ID already exists in memory — including a nil-closure entry that `syncJobsFromDB` injected before this `Register` ran — it re-attaches the closure and refreshes the interval instead of returning "already exists". Callers therefore never need an Unregister+retry workaround for the sync race.
-3. Reads any persisted job (`SelectByID`); when a DB row exists its persisted `NextRunAt` is kept as the schedule, so a redeploy does not reset every job's clock to "now + startAt". `startAt` is only used for brand-new jobs.
+3. Reads any persisted job (`SelectByID`). When a DB row exists and the interval is **unchanged**, its persisted `NextRunAt` is kept (a redeploy does not reset every job's clock). When the **interval changed**, `NextRunAt` is **re-anchored to `startAt`** so a shortened interval takes effect on deploy; `RepeatEvery` is persisted. `startAt` is otherwise only used for brand-new jobs.
 4. If not in DB: creates a new job and inserts
-5. Persists a changed `RepeatEvery` (the pre-fix code updated it in memory only, which the next `syncJobsFromDB` then reverted)
-6. Stores in the in-memory map
+5. **Persist-before-memory:** an interval change is written to the DB **first**; only on success is the in-memory map mutated. The scheduler goroutine is already running, so an un-persisted memory change that the next `syncJobsFromDB` reverts would flap. On `Update` error, memory is left untouched and the error returns.
+6. **Anchor-change escape hatch:** a *same-interval* fire-time change (daily 03:00→04:00, weekly Monday→Tuesday — same `RepeatEvery`) is **not** auto-re-anchored (to preserve no-clock-reset on redeploy). To change a fire time, do a deliberate one-time `Unregister` + `Register` (or use a new job ID). **Do not** reintroduce a per-deploy unregister/register dance for this.
 7. Sends a non-blocking signal on `wakeUp` (via `wake()`) to wake the background loop
 
 ### Unregister (job.go:93-116)
@@ -190,8 +190,9 @@ Execution flow:
 6. **Execute**: Run `j.f(jobCtx)` inside a nested func with `recover()`.
 7. **Gate on lease ownership**: if `leaseLost`, **return without advancing/persisting `NextRunAt`** — the new owner is now responsible for scheduling.
 8. **Advance schedule** (only when the lease was held throughout): `nextRunAt = NextRunAt + RepeatEvery`, advancing past missed intervals; update the in-memory map (under mutex) and persist via `Update`.
+9. **Completion log** (`"job execution completed"`, with `tenant`/`job_id`/`duration_ms`): emitted **only on genuine success** — `j.f` returned nil, did not panic, the lease was held, and the `Update` succeeded. A failed/panicked/lease-lost/update-failed run does **not** emit it. This is the uniform signal for "job ran"; alerting keys off its *absence* per (service, tenant, job).
 
-**Error policy**: `NextRunAt` is advanced even when the job function returns an error (a permanently failing job must not retry in a tight loop) — but NOT when the lease was lost mid-run.
+**Error policy**: `NextRunAt` is advanced even when the job function returns an error (a permanently failing job must not retry in a tight loop) — but NOT when the lease was lost mid-run. Note the advance is independent of *success*: the `"job execution completed"` log (not the schedule advance) is the success signal.
 
 **Heartbeat lease (why)**: the lock is acquired with a TTL lease and renewed while the job runs, so a holder that crashes without unlocking is reclaimable (its lock is stolen once stale) instead of orphaning the job forever. `jobLease`/`jobRenewInterval` are package vars (default 90s / 30s = 3 heartbeats per lease window). `jobLease` need not exceed job runtime — the heartbeat keeps long jobs (e.g. minutes-long reconciliations) alive; it only bounds how long a crashed holder blocks others. The steal comparison assumes pod clocks are NTP-synced within a few seconds. `ownerToken` is a per-process UUID set in `Initialise`; it tags the lock's `description` so Renew/Unlock are owner-safe.
 

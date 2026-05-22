@@ -101,26 +101,36 @@ func Register(ctx convCtx.Context, tenant convAuth.Tenant, jid JobID, startAt ti
 	// re-attach the closure and refresh the interval instead of erroring, so
 	// callers don't need an Unregister+retry workaround.
 	if existing, ok := jobs[tenant][jid]; ok {
-		existing.f = fn
-		existing.RepeatEvery = repeatEvery
-		// Honour the persisted schedule when present so a redeploy doesn't reset
-		// every job's clock; fall back to startAt only when there is no DB row.
-		if savedJob != nil && !savedJob.NextRunAt.IsZero() {
-			existing.NextRunAt = savedJob.NextRunAt
-		} else {
-			existing.NextRunAt = startAt
-		}
-		jobs[tenant][jid] = existing
+		intervalChanged := savedJob != nil && savedJob.RepeatEvery != repeatEvery
 
-		// Persist a changed interval. The pre-fix code updated RepeatEvery in
-		// memory only, which the next syncJobsFromDB then reverted.
-		if savedJob != nil && savedJob.RepeatEvery != repeatEvery {
+		// Decide the schedule: re-anchor to startAt when the interval changed (so a
+		// shortened interval takes effect on deploy); otherwise honour the persisted
+		// NextRunAt so a same-interval redeploy doesn't reset the clock. A same-interval
+		// *anchor* change (e.g. 03:00->04:00) is intentionally NOT re-anchored — it
+		// requires a deliberate Unregister+Register (see lib/job AGENTS.md).
+		nextRunAt := startAt
+		if savedJob != nil && !savedJob.NextRunAt.IsZero() && !intervalChanged {
+			nextRunAt = savedJob.NextRunAt
+		}
+
+		// Persist a schedule change BEFORE mutating memory: the scheduler goroutine is
+		// already running, so an un-persisted memory change that the next syncJobsFromDB
+		// reverts would flap. On Update error, leave memory untouched and return.
+		if intervalChanged {
 			updated := *savedJob
 			updated.RepeatEvery = repeatEvery
+			updated.NextRunAt = nextRunAt
 			if err = jobsDB.Tenant(tenant).Update(ctx, updated); err != nil {
 				return
 			}
 		}
+
+		// Memory mutation (closure re-attach is memory-only and always safe — it re-arms
+		// a sync-injected nil closure, the load-bearing idempotent behaviour).
+		existing.f = fn
+		existing.RepeatEvery = repeatEvery
+		existing.NextRunAt = nextRunAt
+		jobs[tenant][jid] = existing
 
 		wake()
 		return
@@ -141,15 +151,16 @@ func Register(ctx convCtx.Context, tenant convAuth.Tenant, jid JobID, startAt ti
 		return
 	}
 
-	// DB row exists but no in-memory entry yet (first Register after restart):
-	// keep the persisted NextRunAt as the schedule, attach the closure, and persist
-	// a changed interval.
+	// DB row exists but no in-memory entry yet (first Register after restart): keep the
+	// persisted NextRunAt as the schedule, attach the closure, and on an interval change
+	// re-anchor NextRunAt + persist (before the in-memory map assignment below).
 	nj := *savedJob
 	nj.f = fn
 	if savedJob.RepeatEvery != repeatEvery {
 		nj.RepeatEvery = repeatEvery
+		nj.NextRunAt = startAt // re-anchor on interval change
 		if err = jobsDB.Tenant(tenant).Update(ctx, nj); err != nil {
-			return
+			return // memory untouched: jobs[tenant][jid] not yet set
 		}
 	}
 	jobs[tenant][jid] = nj
@@ -465,10 +476,15 @@ func executeJob(ctx convCtx.Context, tenant convAuth.Tenant, j job) {
 	}()
 
 	// Execute job function with panic recovery. j.f receives jobCtx so a job that
-	// honours context cancellation aborts promptly on lease loss.
+	// honours context cancellation aborts promptly on lease loss. Capture the outcome so
+	// the completion log fires only on genuine success (not on mere schedule advance).
+	var jobErr error
+	var jobPanicked bool
+	startedAt := time.Now()
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
+				jobPanicked = true
 				ctx.Logger().Error("job panicked",
 					"tenant", string(tenant),
 					"job_id", string(j.ID),
@@ -477,14 +493,16 @@ func executeJob(ctx convCtx.Context, tenant convAuth.Tenant, j job) {
 			}
 		}()
 
-		if err := j.f(jobCtx); err != nil {
+		if jerr := j.f(jobCtx); jerr != nil {
+			jobErr = jerr
 			ctx.Logger().Error("job execution failed",
 				"tenant", string(tenant),
 				"job_id", string(j.ID),
-				"error", err.Error(),
+				"error", jerr.Error(),
 			)
 		}
 	}()
+	jobDuration := time.Since(startedAt)
 
 	// If the lease was lost mid-run, another instance now owns scheduling — do NOT
 	// advance/persist next_run_at (that would double-advance the schedule).
@@ -516,11 +534,25 @@ func executeJob(ctx convCtx.Context, tenant convAuth.Tenant, j job) {
 	// Update database state
 	updatedJob := j
 	updatedJob.NextRunAt = nextRunAt
+	updateOK := true
 	if err := jobsDB.Tenant(tenant).Update(ctx, updatedJob); err != nil {
+		updateOK = false
 		ctx.Logger().Error("failed to update job next run time in database",
 			"tenant", string(tenant),
 			"job_id", string(j.ID),
 			"error", err.Error(),
+		)
+	}
+
+	// Completion signal — emitted ONLY on genuine success (job returned nil, did not
+	// panic, kept its lease, and the schedule persisted). Alerting keys off the ABSENCE
+	// of this log per (service, tenant, job); a failed/panicked job must NOT emit it.
+	// (Lease-loss already returned above, so reaching here means the lease was held.)
+	if jobErr == nil && !jobPanicked && updateOK {
+		ctx.Logger().Info("job execution completed",
+			"tenant", string(tenant),
+			"job_id", string(j.ID),
+			"duration_ms", jobDuration.Milliseconds(),
 		)
 	}
 }

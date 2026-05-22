@@ -55,7 +55,8 @@ func TestRegisterIdempotentReattachesClosure(t *testing.T) {
 // When the lease is lost mid-execution, executeJob must NOT advance/persist
 // next_run_at (the new owner is now responsible for scheduling).
 func TestExecuteJobSkipsAdvanceOnLeaseLoss(t *testing.T) {
-	ctx := newCtx()
+	base := newCtx()
+	ctx, dump := capturingCtx(base)
 	const jid convJob.JobID = "lease-loss-job"
 	t0 := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
 
@@ -100,5 +101,8 @@ func TestExecuteJobSkipsAdvanceOnLeaseLoss(t *testing.T) {
 	}
 	if !got.Equal(t0) {
 		t.Fatalf("next_run_at advanced despite lease loss: got %v, want %v", got, t0)
+	}
+	if logged(dump(), "job execution completed") {
+		t.Fatalf("must NOT emit completion log when the lease was lost mid-run")
 	}
 }

@@ -88,7 +88,9 @@ When a job is due:
 
 **Crash recovery:** because the lock carries a renewed lease, an instance that crashes mid-job (without unlocking) does not orphan the job forever — once the lease goes stale, another instance steals the lock on its next attempt. If the lease is lost mid-run (stolen/expired), that run does **not** advance `NextRunAt`; the new owner becomes responsible for scheduling.
 
-**Idempotent registration:** registering a job ID that already exists re-attaches the function and refreshes the schedule (it does not error), so a sync-vs-register race needs no caller-side workaround.
+**Idempotent registration:** registering a job ID that already exists re-attaches the function and refreshes the schedule (it does not error), so a sync-vs-register race needs no caller-side workaround. Changing the **interval** re-anchors `NextRunAt` so a shortened interval takes effect on deploy (persisted before the in-memory update); a same-interval **fire-time** change (e.g. 03:00→04:00) is not auto-applied — use a deliberate `Unregister`+`Register`.
+
+**Completion signal:** a successful run emits `"job execution completed"` (`tenant`, `job_id`, `duration_ms`). A failed, panicked, lease-lost, or persist-failed run does not — so monitoring can alert on the *absence* of this log per (service, tenant, job).
 
 ### Job Functions
 
