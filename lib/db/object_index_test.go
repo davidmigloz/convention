@@ -52,6 +52,16 @@ func Test_jsonIndexStatement_nestedKeyPath(t *testing.T) {
 	}
 }
 
+func Test_keyToJsonColumn_escapesSingleQuotes(t *testing.T) {
+	if got, want := keyToJsonColumn("owner's_status"), `"object"->'owner''s_status'`; got != want {
+		t.Fatalf("keyToJsonColumn = %q, want %q", got, want)
+	}
+	// Only the offending nested segment is escaped.
+	if got, want := keyToJsonColumn("a.b'c"), `"object"->'a'->'b''c'`; got != want {
+		t.Fatalf("keyToJsonColumn = %q, want %q", got, want)
+	}
+}
+
 func Test_indexName_collisionSafeForShortKeys(t *testing.T) {
 	dotted := indexName("entity", "a.b")
 	underscored := indexName("entity", "a_b")

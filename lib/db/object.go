@@ -3,7 +3,6 @@ package db
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"hash/crc32"
 	"reflect"
 	"regexp"
@@ -181,15 +180,6 @@ func (os *objectSet[objT, idT, shardKeyT]) prepare() (err error) {
 	os.table, ok = typeToTable[os.vault][os.objType]
 	if ok {
 		return // object already registered for that vault
-	}
-
-	if len(os.indexes) != 0 {
-		for _, index := range os.indexes {
-			if index == textSearchIndex {
-				err = fmt.Errorf("cannot use '%s' as an index field as it is reserved for text search", textSearchIndex)
-				return
-			}
-		}
 	}
 
 	runtimeTableName := toSnakeCase(os.objType.Name())
