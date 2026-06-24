@@ -130,14 +130,21 @@ func keyToJsonColumn(key string) string {
 		return ""
 	}
 	if len(split) == 1 {
-		return `"object"->'` + split[0] + `'`
+		return `"object"->'` + escapeJSONKeySegment(split[0]) + `'`
 	}
 	var sb strings.Builder
 	sb.WriteString(`"object"`)
 	for _, s := range split {
-		sb.WriteString(`->'` + s + `'`)
+		sb.WriteString(`->'` + escapeJSONKeySegment(s) + `'`)
 	}
 	return sb.String()
+}
+
+// escapeJSONKeySegment makes a key segment safe to embed in a single-quoted SQL
+// literal: an apostrophe in the key (or a crafted key) cannot break out of the
+// quoting in the generated query / index DDL.
+func escapeJSONKeySegment(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
 }
 
 func (w *where) Key(key string) whereExpectingOperators {

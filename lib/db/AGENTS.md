@@ -155,7 +155,7 @@ The `prepare()` method:
 3. Registers type in `typeToTable` if not already registered
 4. Generates table names from type name
 5. Creates all tables (runtime, history, lock) with `IF NOT EXISTS`
-6. Creates indexes for configured fields
+6. Creates btree expression indexes for the fields passed to `WithIndexes` (see [Field Indexes](#field-indexes-withindexes))
 7. Stores table metadata in `typeToTable[vault][objType]`
 
 **Important**: Table creation happens on first access, not at program start.
@@ -448,6 +448,32 @@ Converts `"hello world"` to `"hello & world"` for AND search.
 ```
 
 Automatically indexes all text in the JSONB object.
+
+### Field Indexes (`WithIndexes`)
+
+`WithIndexes("state", "grants.allow_pro_supply", …)` creates one **btree expression
+index per field** on the exact JSONB expression the query builder targets:
+
+```sql
+CREATE INDEX IF NOT EXISTS "<table>_<sanitized>_<hash>"
+ON "<table>" (("object"->'state'));
+-- nested keys use the same -> chain as keyToJsonColumn:
+ON "<table>" (("object"->'grants'->'allow_pro_supply'));
+```
+
+Contract:
+- **Honours the passed field names** (a previous version discarded them and indexed
+  the object type name — an always-NULL key; `prepare()` now `DROP INDEX IF EXISTS`
+  that obsolete `<table>_<TypeName>` index once on upgrade).
+- **btree, not GIN.** The builder compares with `=`/`IN`/range on `"object"->'k'`,
+  which the default jsonb btree opclass serves and GIN `jsonb_ops` does not. (GIN
+  stays only for `WithTextSearch`'s tsvector.)
+- **Dotted keys** become nested `->` paths via the same `keyToJsonColumn` the builder
+  uses, so the index expression equals the queried expression.
+- **Index names** are sanitised and always carry a hash suffix (≤63 chars), so keys
+  that sanitise to the same text (`a.b` vs `a_b`) never collide.
+- **Scalar leaf fields only** — btree has an index-entry size limit; do not index a
+  whole nested object.
 
 ### Process vs Select
 
