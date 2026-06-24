@@ -43,13 +43,20 @@ func (m Message) DBKey() db.Key[MessageID, MessageID] {
 
 ```go
 var messagesDB = db.NewObjectSet[Message]("messages_vault").
-    WithTextSearch().  // Optional: enable full-text search
+    WithTextSearch().                       // Optional: enable full-text search
+    WithIndexes("status", "chat.chat_id").  // Optional: btree indexes on these JSONB fields (dotted = nested)
     WithCompute(func(ctx convCtx.Context, md db.Metadata, obj *Message) error {
         // Optional: compute derived fields
         return nil
     }).
     Ready()
 ```
+
+`WithIndexes` creates one btree expression index per field on the exact JSONB
+expression the query builder targets (`"object"->'status'`), so `=`/`IN`/range
+filters on that field can use it. Pass **scalar leaf fields**; dotted keys index
+the nested path. See the [Field Indexes](AGENTS.md#field-indexes-withindexes)
+notes for the full contract.
 
 ### 3. Perform Operations
 

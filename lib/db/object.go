@@ -4,8 +4,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 
 	convAuth "github.com/sofmon/convention/lib/auth"
@@ -52,6 +54,50 @@ func toSnakeCase(str string) string {
 	return strings.ToLower(snake)
 }
 
+// sanitizeIndexPart lowercases and replaces every non-identifier rune (including
+// the '.' of a nested key path) with '_', yielding a readable index-name prefix.
+func sanitizeIndexPart(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r + ('a' - 'A'))
+		default:
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
+}
+
+// indexName builds a collision-safe Postgres identifier (<=63 chars) for a
+// per-key index. It ALWAYS appends a hash of table+key so that distinct keys
+// which sanitise to the same readable text (e.g. "a.b" vs "a_b") cannot collide
+// and have one silently skipped by CREATE INDEX IF NOT EXISTS.
+func indexName(table, key string) string {
+	sum := crc32.ChecksumIEEE([]byte(table + "\x00" + key))
+	suffix := "_" + strconv.FormatUint(uint64(sum), 16)
+	readable := table + "_" + sanitizeIndexPart(key)
+	if max := 63 - len(suffix); len(readable) > max {
+		readable = readable[:max]
+	}
+	return readable + suffix
+}
+
+// jsonIndexStatement returns the DDL for a btree expression index on the JSONB
+// path `key` (dotted paths become nested ->, matching keyToJsonColumn used by
+// the query builder, so the index expression equals the queried expression).
+// btree — not GIN — because the builder compares with `=`/`IN`/range on
+// `"object"->'k'`, which a GIN jsonb_ops index cannot serve but the default
+// jsonb btree opclass can. Keys must be scalar leaf fields (btree entry-size
+// limit).
+func jsonIndexStatement(table, key string) string {
+	return `CREATE INDEX IF NOT EXISTS "` + indexName(table, key) + `"
+ON "` + table + `" ((` + keyToJsonColumn(key) + `));
+`
+}
+
 func dbsForShardKeys[shardKeyT ~string](vault Vault, tenant convAuth.Tenant, sks ...shardKeyT) ([]*sql.DB, error) {
 	s := make([]string, len(sks))
 	for i, sk := range sks {
@@ -77,7 +123,7 @@ func (os *objectSet[objT, idT, shardKeyT]) WithTextSearch() ObjectSetSetup[objT,
 }
 
 func (os *objectSet[objT, idT, shardKeyT]) WithIndexes(indexes ...string) ObjectSetSetup[objT, idT, shardKeyT] {
-	os.indexes = append(os.indexes, os.objType.Name())
+	os.indexes = append(os.indexes, indexes...)
 	return os
 }
 
@@ -180,10 +226,17 @@ CREATE TABLE IF NOT EXISTS "` + lockTableName + `" (
 );
 `
 
-	for _, index := range os.indexes {
-		createScript += `CREATE INDEX IF NOT EXISTS "` + runtimeTableName + `_` + index + `"
-ON "` + runtimeTableName + `" USING gin (("object"->'` + index + `'));
+	if len(os.indexes) != 0 {
+		// One-time cleanup of the always-NULL GIN index a previous version of
+		// WithIndexes created under the object type name; the corrected btree
+		// indexes below use different (hashed) names, so this self-heals on the
+		// first prepare after upgrade. No-op where it never existed.
+		createScript += `DROP INDEX IF EXISTS "` + runtimeTableName + `_` + os.objType.Name() + `";
 `
+	}
+
+	for _, index := range os.indexes {
+		createScript += jsonIndexStatement(runtimeTableName, index)
 	}
 
 	if os.textSearch {
