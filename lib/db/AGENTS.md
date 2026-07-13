@@ -176,6 +176,14 @@ The where builder uses a fluent interface with type state transitions:
 - Parameter placeholders: `$1`, `$2`, etc. (PostgreSQL style)
 - `statement()` method returns `(query, params, error)`
 
+**Error latching**: the builder latches the first error into `w.err` (empty
+key, `json.Marshal` failure, error propagated from an inner `Expression`) and
+every subsequent builder method is a no-op — nothing more is written to the
+query and no params are appended. `strings.Builder` writes never fail, so
+their results are discarded rather than assigned to `w.err` (assigning would
+clobber a previously latched error with `nil`). `statement()` surfaces the
+latched error.
+
 **JSON Column Access**:
 ```go
 func keyToJsonColumn(key string) string
@@ -185,15 +193,22 @@ Converts dot notation to PostgreSQL JSONB operators:
 - `"address.city"` → `"object"->'address'->'city'`
 
 **Parameter Marshaling**:
-[where.go:225-227](where.go#L225-L227)
+[where.go:240-252](where.go#L240-L252)
 
 All values are JSON-marshaled before being added to params:
 ```go
-jsonValue, w.err = json.Marshal(value)
+jsonValue, err := json.Marshal(value)
+if err != nil {
+    w.err = err
+    return w
+}
+w.query.WriteString(`$` + strconv.Itoa(len(w.params)+1))
 w.params = append(w.params, string(jsonValue))
 ```
 
-This ensures proper type handling in JSONB comparisons.
+This ensures proper type handling in JSONB comparisons. A marshal failure
+latches the error before anything is emitted, so neither a placeholder nor a
+parameter is added for the failing value.
 
 ### Transaction Patterns
 
@@ -418,21 +433,26 @@ When shard keys provided:
 Without shard keys: Returns all databases for tenant.
 
 ### Text Search
-[where.go:271-275](where.go#L271-L275)
+[where.go:291-299](where.go#L291-L299)
 
 ```go
 func (w *where) Search(text string) whereExpectingLogicalOperator {
-    _, w.err = w.query.WriteString(`"text_search" @@ to_tsquery('english', $` + strconv.Itoa(len(w.params)+1) + `)`)
+    if w.err != nil {
+        return w
+    }
+    w.query.WriteString(`"text_search" @@ to_tsquery('english', $` + strconv.Itoa(len(w.params)+1) + `)`)
     w.params = append(w.params, toTSQuery(text))
     return w
 }
 ```
 
-**Text search preprocessing** ([where.go:366-378](where.go#L366-L378)):
+**Text search preprocessing** ([where.go:401-416](where.go#L401-L416)):
 ```go
+var whitespacePattern = regexp.MustCompile(`\s+`)
+
 func toTSQuery(input string) string {
     // Normalize whitespace
-    input = regexp.MustCompile(`\s+`).ReplaceAllString(input, " ")
+    input = whitespacePattern.ReplaceAllString(input, " ")
     input = strings.TrimSpace(input)
     // Convert spaces to & operator
     input = strings.ReplaceAll(input, " ", " & ")

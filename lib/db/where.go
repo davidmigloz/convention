@@ -78,6 +78,9 @@ type whereExpectingValues interface {
 	Values(values ...any) whereExpectingLogicalOperator
 }
 
+// where latches the first error into err; every builder method is a no-op
+// once err is set. strings.Builder writes never fail, so their results are
+// discarded rather than assigned over a previously latched error.
 type where struct {
 	query  strings.Builder
 	params []any
@@ -92,7 +95,10 @@ func (w *where) statement() (string, []any, error) {
 }
 
 func (w *where) Noop() whereExpectingLogicalOperator {
-	_, w.err = w.query.WriteString("1=1")
+	if w.err != nil {
+		return w
+	}
+	w.query.WriteString("1=1")
 	return w
 }
 
@@ -153,8 +159,9 @@ func (w *where) Key(key string) whereExpectingOperators {
 	}
 	if key == "" {
 		w.err = errors.New("key cannot be empty")
+		return w
 	}
-	_, w.err = w.query.WriteString(keyToJsonColumn(key))
+	w.query.WriteString(keyToJsonColumn(key))
 	return w
 }
 
@@ -162,7 +169,7 @@ func (w *where) Equals() whereExpectingValue {
 	if w.err != nil {
 		return w
 	}
-	_, w.err = w.query.WriteRune('=')
+	w.query.WriteRune('=')
 	return w
 }
 
@@ -170,7 +177,7 @@ func (w *where) NotEquals() whereExpectingValue {
 	if w.err != nil {
 		return w
 	}
-	_, w.err = w.query.WriteString(`!=`)
+	w.query.WriteString(`!=`)
 	return w
 }
 
@@ -178,7 +185,7 @@ func (w *where) GreaterThan() whereExpectingValue {
 	if w.err != nil {
 		return w
 	}
-	_, w.err = w.query.WriteRune('>')
+	w.query.WriteRune('>')
 	return w
 }
 
@@ -186,7 +193,7 @@ func (w *where) GreaterThanOrEquals() whereExpectingValue {
 	if w.err != nil {
 		return w
 	}
-	_, w.err = w.query.WriteString(`>=`)
+	w.query.WriteString(`>=`)
 	return w
 }
 
@@ -194,7 +201,7 @@ func (w *where) LessThan() whereExpectingValue {
 	if w.err != nil {
 		return w
 	}
-	_, w.err = w.query.WriteRune('<')
+	w.query.WriteRune('<')
 	return w
 }
 
@@ -202,22 +209,31 @@ func (w *where) LessThanOrEquals() whereExpectingValue {
 	if w.err != nil {
 		return w
 	}
-	_, w.err = w.query.WriteString(`<=`)
+	w.query.WriteString(`<=`)
 	return w
 }
 
 func (w *where) Like() whereExpectingValue {
-	_, w.err = w.query.WriteString(` LIKE `)
+	if w.err != nil {
+		return w
+	}
+	w.query.WriteString(` LIKE `)
 	return w
 }
 
 func (w *where) In() whereExpectingValues {
-	_, w.err = w.query.WriteString(` IN `)
+	if w.err != nil {
+		return w
+	}
+	w.query.WriteString(` IN `)
 	return w
 }
 
 func (w *where) NotIn() whereExpectingValues {
-	_, w.err = w.query.WriteString(` NOT IN `)
+	if w.err != nil {
+		return w
+	}
+	w.query.WriteString(` NOT IN `)
 	return w
 }
 
@@ -225,12 +241,12 @@ func (w *where) Value(value any) whereExpectingLogicalOperator {
 	if w.err != nil {
 		return w
 	}
-	_, w.err = w.query.WriteString(`$` + strconv.Itoa(len(w.params)+1))
-	if w.err != nil {
+	jsonValue, err := json.Marshal(value)
+	if err != nil {
+		w.err = err
 		return w
 	}
-	var jsonValue []byte
-	jsonValue, w.err = json.Marshal(value)
+	w.query.WriteString(`$` + strconv.Itoa(len(w.params)+1))
 	w.params = append(w.params, string(jsonValue))
 	return w
 }
@@ -239,68 +255,80 @@ func (w *where) Values(values ...any) whereExpectingLogicalOperator {
 	if w.err != nil {
 		return w
 	}
-	_, w.err = w.query.WriteRune('(')
-	if w.err != nil {
-		return w
-	}
+	w.query.WriteRune('(')
 	for i, value := range values {
+		jsonValue, err := json.Marshal(value)
+		if err != nil {
+			w.err = err
+			return w
+		}
 		if i > 0 {
-			_, w.err = w.query.WriteString(`,`)
-			if w.err != nil {
-				return w
-			}
+			w.query.WriteString(`,`)
 		}
-		_, w.err = w.query.WriteString(`$` + strconv.Itoa(len(w.params)+1))
-		if w.err != nil {
-			return w
-		}
-		var jsonValue []byte
-		jsonValue, w.err = json.Marshal(value)
-		if w.err != nil {
-			return w
-		}
+		w.query.WriteString(`$` + strconv.Itoa(len(w.params)+1))
 		w.params = append(w.params, string(jsonValue))
 	}
-	_, w.err = w.query.WriteRune(')')
+	w.query.WriteRune(')')
 	return w
 }
 
 func (w *where) Or() whereExpectingFirstStatement {
-	_, w.err = w.query.WriteString(` OR `)
+	if w.err != nil {
+		return w
+	}
+	w.query.WriteString(` OR `)
 	return w
 }
 
 func (w *where) And() whereExpectingFirstStatement {
-	_, w.err = w.query.WriteString(` AND `)
+	if w.err != nil {
+		return w
+	}
+	w.query.WriteString(` AND `)
 	return w
 }
 
 func (w *where) Search(text string) whereExpectingLogicalOperator {
-	_, w.err = w.query.WriteString(`"text_search" @@ to_tsquery('english', $` + strconv.Itoa(len(w.params)+1) + `)`)
+	if w.err != nil {
+		return w
+	}
+	w.query.WriteString(`"text_search" @@ to_tsquery('english', $` + strconv.Itoa(len(w.params)+1) + `)`)
 	w.params = append(w.params, toTSQuery(text))
 	return w
 }
 
 func (w *where) CreatedBetween(a, b time.Time) whereExpectingLogicalOperator {
-	_, w.err = w.query.WriteString(`"created_at" BETWEEN $` + strconv.Itoa(len(w.params)+1) + ` AND $` + strconv.Itoa(len(w.params)+2))
+	if w.err != nil {
+		return w
+	}
+	w.query.WriteString(`"created_at" BETWEEN $` + strconv.Itoa(len(w.params)+1) + ` AND $` + strconv.Itoa(len(w.params)+2))
 	w.params = append(w.params, a, b)
 	return w
 }
 
 func (w *where) CreatedBy(user string) whereExpectingLogicalOperator {
-	_, w.err = w.query.WriteString(`"created_by" = $` + strconv.Itoa(len(w.params)+1))
+	if w.err != nil {
+		return w
+	}
+	w.query.WriteString(`"created_by" = $` + strconv.Itoa(len(w.params)+1))
 	w.params = append(w.params, user)
 	return w
 }
 
 func (w *where) UpdatedBetween(a, b time.Time) whereExpectingLogicalOperator {
-	_, w.err = w.query.WriteString(`"updated_at" BETWEEN $` + strconv.Itoa(len(w.params)+1) + ` AND $` + strconv.Itoa(len(w.params)+2))
+	if w.err != nil {
+		return w
+	}
+	w.query.WriteString(`"updated_at" BETWEEN $` + strconv.Itoa(len(w.params)+1) + ` AND $` + strconv.Itoa(len(w.params)+2))
 	w.params = append(w.params, a, b)
 	return w
 }
 
 func (w *where) UpdatedBy(user string) whereExpectingLogicalOperator {
-	_, w.err = w.query.WriteString(`"updated_by" = $` + strconv.Itoa(len(w.params)+1))
+	if w.err != nil {
+		return w
+	}
+	w.query.WriteString(`"updated_by" = $` + strconv.Itoa(len(w.params)+1))
 	w.params = append(w.params, user)
 	return w
 }
@@ -309,7 +337,7 @@ func (w *where) OrderByCreatedAtAsc() whereOrdered {
 	if w.err != nil {
 		return w
 	}
-	_, w.err = w.query.WriteString(` ORDER BY "created_at" ASC`)
+	w.query.WriteString(` ORDER BY "created_at" ASC`)
 	return w
 }
 
@@ -317,7 +345,7 @@ func (w *where) OrderByCreatedAtDesc() whereOrdered {
 	if w.err != nil {
 		return w
 	}
-	_, w.err = w.query.WriteString(` ORDER BY "created_at" DESC`)
+	w.query.WriteString(` ORDER BY "created_at" DESC`)
 	return w
 }
 
@@ -325,7 +353,7 @@ func (w *where) OrderByUpdatedAtAsc() whereOrdered {
 	if w.err != nil {
 		return w
 	}
-	_, w.err = w.query.WriteString(` ORDER BY "updated_at" ASC`)
+	w.query.WriteString(` ORDER BY "updated_at" ASC`)
 	return w
 }
 
@@ -333,7 +361,7 @@ func (w *where) OrderByUpdatedAtDesc() whereOrdered {
 	if w.err != nil {
 		return w
 	}
-	_, w.err = w.query.WriteString(` ORDER BY "updated_at" DESC`)
+	w.query.WriteString(` ORDER BY "updated_at" DESC`)
 	return w
 }
 
@@ -341,7 +369,7 @@ func (w *where) OrderByAsc(key string) whereOrdered {
 	if w.err != nil {
 		return w
 	}
-	_, w.err = w.query.WriteString(` ORDER BY ` + keyToJsonColumn(key) + ` ASC`)
+	w.query.WriteString(` ORDER BY ` + keyToJsonColumn(key) + ` ASC`)
 	return w
 }
 
@@ -349,7 +377,7 @@ func (w *where) OrderByDesc(key string) whereOrdered {
 	if w.err != nil {
 		return w
 	}
-	_, w.err = w.query.WriteString(` ORDER BY ` + keyToJsonColumn(key) + ` DESC`)
+	w.query.WriteString(` ORDER BY ` + keyToJsonColumn(key) + ` DESC`)
 	return w
 }
 
@@ -357,7 +385,7 @@ func (w *where) LimitPerShard(limit int) whereLimited {
 	if w.err != nil {
 		return w
 	}
-	_, w.err = w.query.WriteString(` LIMIT ` + strconv.Itoa(limit))
+	w.query.WriteString(` LIMIT ` + strconv.Itoa(limit))
 	return w
 }
 
@@ -365,15 +393,17 @@ func (w *where) Offset(offset int) whereClosed {
 	if w.err != nil {
 		return w
 	}
-	_, w.err = w.query.WriteString(` OFFSET ` + strconv.Itoa(offset))
+	w.query.WriteString(` OFFSET ` + strconv.Itoa(offset))
 
 	return w
 }
 
+var whitespacePattern = regexp.MustCompile(`\s+`)
+
 func toTSQuery(input string) string {
 
 	// Step 1: Replace multiple spaces with a single space
-	input = regexp.MustCompile(`\s+`).ReplaceAllString(input, " ")
+	input = whitespacePattern.ReplaceAllString(input, " ")
 
 	// Step 2: Trim leading and trailing spaces (if any)
 	input = strings.TrimSpace(input)
