@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+var placeholderPattern = regexp.MustCompile(`\$\d+`)
+
 func Where() whereExpectingFirstStatement {
 	return &where{}
 }
@@ -116,10 +118,20 @@ func (w *where) Expression(where whereExpectingLogicalOperator) whereExpectingLo
 		return w
 	}
 
-	for i, param := range params {
-		query = strings.ReplaceAll(query, "$"+strconv.Itoa(i+1), "$"+strconv.Itoa(len(w.params)+1))
-		w.params = append(w.params, param)
+	// Shift every inner placeholder by the outer parameter count in one pass.
+	// Sequential ReplaceAll must not be used here: it re-matches its own
+	// output (collapsing distinct placeholders → Postgres 42P18) and the
+	// "$1" pattern also matches the prefix of "$10".
+	if offset := len(w.params); offset > 0 {
+		query = placeholderPattern.ReplaceAllStringFunc(query, func(m string) string {
+			n, err := strconv.Atoi(m[1:])
+			if err != nil {
+				return m
+			}
+			return "$" + strconv.Itoa(n+offset)
+		})
 	}
+	w.params = append(w.params, params...)
 
 	_, w.err = w.query.WriteString(query)
 	if w.err != nil {
