@@ -507,6 +507,8 @@ Contract:
 **Select** ([select.go:220-281](select.go#L220-L281)):
 - Loads all results into memory
 - Returns slice
+- `Select` and `SelectWithMetadata` exclude runtime rows whose `object` column
+  is SQL `NULL`; the same defensive check is applied after scanning
 - Good for small/medium result sets
 
 **Process** ([process.go:11-70](process.go#L11-L70)):

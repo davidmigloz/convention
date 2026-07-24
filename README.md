@@ -211,6 +211,10 @@ Each shard contains a subset of the data, and the **Convention** implementation 
 
 Changing the number of shards requires a full data migration, which can be achieved through the multi vault mechanism. This allows each **agent** to migrate its own data as part of their operations.
 
+`Select` and `SelectWithMetadata` exclude runtime rows whose `object` column is
+SQL `NULL`. A runtime row without an object is treated as absent; deletion
+tombstones use SQL `NULL` only in history tables.
+
 ### Database Configuration
 
 Database configurations are located in the **database** key in `/etc/agent/database`, specifying database connection per vault, tenants, and shards.
