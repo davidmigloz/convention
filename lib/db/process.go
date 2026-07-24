@@ -21,7 +21,7 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) Process(ctx convCtx.Context, wh
 		return
 	}
 
-	statement, params, err := where.statement()
+	statement, params, err := runtimeObjectWhereStatement(where)
 	if err != nil {
 		err = fmt.Errorf("error building where statement: %w", err)
 		return
@@ -49,6 +49,9 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) Process(ctx convCtx.Context, wh
 			err = rows.Scan(&bytes)
 			if err != nil {
 				return
+			}
+			if bytes == nil {
+				continue
 			}
 
 			err = json.Unmarshal(bytes, &obj)
@@ -82,7 +85,7 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) ProcessWithMetadata(ctx convCtx
 		return
 	}
 
-	statement, params, err := where.statement()
+	statement, params, err := runtimeObjectWhereStatement(where)
 	if err != nil {
 		err = fmt.Errorf("error building where statement: %w", err)
 		return
@@ -111,6 +114,9 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) ProcessWithMetadata(ctx convCtx
 			err = rows.Scan(&bytes, &md.CreatedAt, &md.CreatedBy, &md.UpdatedAt, &md.UpdatedBy)
 			if err != nil {
 				return
+			}
+			if bytes == nil {
+				continue
 			}
 
 			err = json.Unmarshal(bytes, &obj)

@@ -172,10 +172,15 @@ The where builder uses a fluent interface with type state transitions:
 5. `whereExpectingLogicalOperator`: After value, can add `And()`/`Or()` or ordering
 
 **SQL Generation**:
-- Query string built with `strings.Builder`
+- Predicate and `ORDER BY` / `LIMIT` / `OFFSET` tail are built separately,
+  then combined by `statement()` for callers that need the original complete
+  statement
 - Parameters stored in slice
 - Parameter placeholders: `$1`, `$2`, etc. (PostgreSQL style)
 - `statement()` method returns `(query, params, error)`
+- Filtered collection reads use the separated parts to emit
+  `"object" IS NOT NULL AND (<predicate>) <tail>`, preserving the caller's
+  top-level `OR` semantics without allowing it to bypass the live-object guard
 
 **Error latching**: the builder latches the first error into `w.err` (empty
 key, `json.Marshal` failure, error propagated from an inner `Expression`) and
@@ -507,14 +512,17 @@ Contract:
 **Select** ([select.go:220-281](select.go#L220-L281)):
 - Loads all results into memory
 - Returns slice
-- `Select` and `SelectWithMetadata` exclude runtime rows whose `object` column
-  is SQL `NULL`; the same defensive check is applied after scanning
+- `Select`, `SelectWithMetadata`, `SelectAll`, and
+  `SelectAllWithMetadata` exclude runtime rows whose `object` column is SQL
+  `NULL`; the same defensive check is applied after scanning
 - Good for small/medium result sets
 
 **Process** ([process.go:11-70](process.go#L11-L70)):
 - Streams results via callback
 - No intermediate storage
 - Returns count of processed items
+- `Process` and `ProcessWithMetadata` apply the same SQL and post-scan
+  live-object checks as `Select`
 - Good for large result sets or when transformation is needed
 
 ```go

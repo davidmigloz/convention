@@ -249,6 +249,38 @@ func TestSelect_ignoresNullRuntimeObjects(t *testing.T) {
 	}
 }
 
+func TestSelectAll_ignoresNullRuntimeObjects(t *testing.T) {
+	ctx := convCtx.New(convAuth.Claims{User: convAuth.User(t.Name())})
+	clearMessagesDB(ctx)
+	if _, err := messagesDB.Tenant("test").Select(ctx, convDB.Where().Noop()); err != nil {
+		t.Fatalf("prepare message ObjectSet: %v", err)
+	}
+	insertNullMessageRows(t)
+
+	t.Run("without metadata", func(t *testing.T) {
+		messages, err := messagesDB.Tenant("test").SelectAll(ctx)
+		if err != nil {
+			t.Fatalf("SelectAll failed for SQL NULL runtime object: %v", err)
+		}
+		if len(messages) != 0 {
+			t.Fatalf("SelectAll returned %d SQL NULL runtime objects", len(messages))
+		}
+	})
+
+	t.Run("with metadata", func(t *testing.T) {
+		messages, err := messagesDB.Tenant("test").SelectAllWithMetadata(ctx)
+		if err != nil {
+			t.Fatalf("SelectAllWithMetadata failed for SQL NULL runtime object: %v", err)
+		}
+		if len(messages) != 0 {
+			t.Fatalf(
+				"SelectAllWithMetadata returned %d SQL NULL runtime objects",
+				len(messages),
+			)
+		}
+	})
+}
+
 func Test_order_limit_offset(t *testing.T) {
 
 	ctx := convCtx.New(convAuth.Claims{User: "Test_order_limit_offset"})

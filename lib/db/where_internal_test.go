@@ -237,6 +237,47 @@ func Test_where_statements(t *testing.T) {
 	}
 }
 
+func Test_where_separatesPredicateFromOrderAndLimit(t *testing.T) {
+	where := Where().
+		Key("x").Equals().Value("good").
+		Or().CreatedBy("operator").
+		OrderByUpdatedAtAsc().
+		LimitPerShard(10)
+
+	parts, ok := any(where).(interface {
+		statementParts() (predicate string, tail string, params []any, err error)
+	})
+	if !ok {
+		t.Fatal("where statement must expose its predicate separately from ORDER BY, LIMIT, and OFFSET")
+	}
+
+	predicate, tail, params, err := parts.statementParts()
+	if err != nil {
+		t.Fatalf("statementParts() failed: %v", err)
+	}
+	if predicate != `"object"->'x'=$1 OR "created_by" = $2` {
+		t.Fatalf("unexpected predicate: %q", predicate)
+	}
+	if tail != `ORDER BY "updated_at" ASC LIMIT 10` {
+		t.Fatalf("unexpected statement tail: %q", tail)
+	}
+	if !reflect.DeepEqual(params, []any{`"good"`, "operator"}) {
+		t.Fatalf("unexpected params: %#v", params)
+	}
+
+	filtered, filteredParams, err := runtimeObjectWhereStatement(where)
+	if err != nil {
+		t.Fatalf("runtimeObjectWhereStatement() failed: %v", err)
+	}
+	want := `"object" IS NOT NULL AND ("object"->'x'=$1 OR "created_by" = $2) ORDER BY "updated_at" ASC LIMIT 10`
+	if filtered != want {
+		t.Fatalf("unexpected filtered statement:\n got %q\nwant %q", filtered, want)
+	}
+	if !reflect.DeepEqual(filteredParams, params) {
+		t.Fatalf("filtered params mismatch:\n got %#v\nwant %#v", filteredParams, params)
+	}
+}
+
 func Test_toTSQuery(t *testing.T) {
 	tests := []struct {
 		name  string
