@@ -21,6 +21,8 @@ func Test_where_preservesLatchedError(t *testing.T) {
 		{"Key", func(w *where) { w.Key("k") }},
 		{"Equals", func(w *where) { w.Equals() }},
 		{"NotEquals", func(w *where) { w.NotEquals() }},
+		{"IsNull", func(w *where) { w.IsNull() }},
+		{"IsNotNull", func(w *where) { w.IsNotNull() }},
 		{"GreaterThan", func(w *where) { w.GreaterThan() }},
 		{"GreaterThanOrEquals", func(w *where) { w.GreaterThanOrEquals() }},
 		{"LessThan", func(w *where) { w.LessThan() }},
@@ -154,6 +156,28 @@ func Test_where_statements(t *testing.T) {
 			func() whereReady { return Where().Key("x").Equals().Value(2).And().Key("y").Equals().Value(3) },
 			`"object"->'x'=$1 AND "object"->'y'=$2`,
 			[]any{"2", "3"},
+		},
+		{
+			"is_null_and_is_null",
+			func() whereReady {
+				return Where().Key("completed_at").IsNull().
+					And().Key("abandoned_at").IsNull().
+					OrderByUpdatedAtAsc().LimitPerShard(10)
+			},
+			`"object"->'completed_at' IS NULL AND "object"->'abandoned_at' IS NULL ORDER BY "updated_at" ASC LIMIT 10`,
+			nil,
+		},
+		{
+			"is_not_null_nested",
+			func() whereReady { return Where().Key("management.managing_entity").IsNotNull() },
+			`"object"->'management'->'managing_entity' IS NOT NULL`,
+			nil,
+		},
+		{
+			"equals_explicit_json_null",
+			func() whereReady { return Where().Key("deleted_at").Equals().Value(nil) },
+			`"object"->'deleted_at'=$1`,
+			[]any{"null"},
 		},
 		{
 			"in_values",

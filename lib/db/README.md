@@ -119,7 +119,7 @@ The `Where()` function provides a type-safe, fluent interface for building queri
 ```go
 db.Where().
     Key("field").Equals().Value("value").           // Simple equality
-    And().Key("deleted_at").IsNull().               // Missing JSON field
+    And().Key("deleted_at").IsNull().               // Omitted field (requires json:",omitempty")
     And().Key("count").GreaterThan().Value(10).     // Comparison
     And().Key("status").In().Values("active", "pending"). // IN clause
     And().Search("search terms").                   // Full-text search
@@ -142,7 +142,9 @@ db.Where().
 - `Like()`
 
 `IsNull()` and `IsNotNull()` test the SQL nullity of the JSON path expression.
-An absent key is SQL `NULL`; an explicitly stored JSON `null` is not.
+An absent key is SQL `NULL`; an explicitly stored JSON `null` is not. A nil Go
+pointer without `omitempty` is stored as explicit JSON `null`, so match that
+case with `Key("field").Equals().Value(nil)`.
 
 ### Metadata Filters
 

@@ -195,10 +195,12 @@ Converts dot notation to PostgreSQL JSONB operators:
 
 `IsNull()` / `IsNotNull()` apply SQL null predicates directly to that JSON
 path expression. Missing keys yield SQL `NULL`; explicit JSON `null` remains
-a JSONB value and does not match `IsNull()`.
+a JSONB value and does not match `IsNull()`. A nil Go pointer without
+`omitempty` is stored as explicit JSON `null`; query that representation with
+`Key("field").Equals().Value(nil)`.
 
 **Parameter Marshaling**:
-[where.go:240-252](where.go#L240-L252)
+[where.go:270-281](where.go#L270-L281)
 
 All values are JSON-marshaled before being added to params:
 ```go
@@ -438,7 +440,7 @@ When shard keys provided:
 Without shard keys: Returns all databases for tenant.
 
 ### Text Search
-[where.go:291-299](where.go#L291-L299)
+[where.go:321-328](where.go#L321-L328)
 
 ```go
 func (w *where) Search(text string) whereExpectingLogicalOperator {
@@ -451,7 +453,7 @@ func (w *where) Search(text string) whereExpectingLogicalOperator {
 }
 ```
 
-**Text search preprocessing** ([where.go:401-416](where.go#L401-L416)):
+**Text search preprocessing** ([where.go:431-444](where.go#L431-L444)):
 ```go
 var whitespacePattern = regexp.MustCompile(`\s+`)
 
