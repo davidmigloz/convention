@@ -171,7 +171,7 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) SafeUpdate(ctx convCtx.Context,
 		cmp     objT
 		md      Metadata
 	)
-	row := tx.QueryRow(`SELECT "object", "created_at", "created_by", "updated_at", "updated_by" FROM "`+tos.table.RuntimeTableName+`" WHERE "id"=$1`+lockClause, fromKey.ID)
+	row := tx.QueryRow(`SELECT "object", "created_at", "created_by", "updated_at", "updated_by" FROM "`+tos.table.RuntimeTableName+`" WHERE "id"=$1 AND "object" IS NOT NULL`+lockClause, fromKey.ID)
 	err = row.Scan(&cmpData, &md.CreatedAt, &md.CreatedBy, &md.UpdatedAt, &md.UpdatedBy)
 	if err == sql.ErrNoRows {
 		err = fmt.Errorf("%w: id=%s", ErrObjectNotFound, fromKey.ID)
@@ -181,6 +181,10 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) SafeUpdate(ctx convCtx.Context,
 		if mapped, ok := classifyContentionErr(err); ok {
 			err = fmt.Errorf("%w: id=%s", mapped, fromKey.ID)
 		}
+		return
+	}
+	if cmpData == nil {
+		err = fmt.Errorf("%w: id=%s", ErrObjectNotFound, fromKey.ID)
 		return
 	}
 

@@ -348,6 +348,48 @@ func Test_SafeUpdate(t *testing.T) {
 		}
 	})
 
+	t.Run("sql_null_object_is_not_found_before_comparing_from", func(t *testing.T) {
+		from := newComplexFixture(t, ctx, "sql-null")
+
+		dbs, err := convDB.DBs("complex", "test")
+		if err != nil {
+			t.Fatalf("DBs failed: %v", err)
+		}
+		if len(dbs) != 1 {
+			t.Fatalf("complex test database has %d shards, want 1", len(dbs))
+		}
+		res, err := dbs[0].Exec(
+			`UPDATE "complex_object" SET "object"=NULL WHERE "id"=$1`,
+			from.ComplexID,
+		)
+		if err != nil {
+			t.Fatalf("set runtime object to SQL NULL: %v", err)
+		}
+		if affected, err := res.RowsAffected(); err != nil {
+			t.Fatalf("read affected rows: %v", err)
+		} else if affected != 1 {
+			t.Fatalf("set %d runtime objects to SQL NULL, want 1", affected)
+		}
+
+		marshalCount := 0
+		from.marshalCount = &marshalCount
+		from.failOn = 1
+		to := from
+		to.Title = "must-not-be-written"
+
+		err = complexDB.Tenant("test").SafeUpdate(ctx, from, to)
+
+		if !errors.Is(err, convDB.ErrObjectNotFound) {
+			t.Fatalf("expected ErrObjectNotFound for SQL-NULL runtime object, got %v", err)
+		}
+		if marshalCount != 0 {
+			t.Fatalf(
+				"SafeUpdate marshalled the caller comparison side %d times after finding an absent row",
+				marshalCount,
+			)
+		}
+	})
+
 	t.Run("cas_conflict_via_update", func(t *testing.T) {
 		from := newComplexFixture(t, ctx, "cas-update")
 		racer := from

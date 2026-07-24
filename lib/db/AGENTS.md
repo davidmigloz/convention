@@ -120,6 +120,14 @@ Simple modulo distribution using CRC32 checksum. This provides:
 - Public `DBs(vault, tenant) ([]*sql.DB, error)` projects to `*sql.DB` only —
   signature is preserved for downstream callers. Engine-aware access is
   internal-only via `dbByShardKeyWithEngine`.
+- Tenant-bound raw access should use `TenantObjectSet.RawDBs()` or
+  `TenantObjectSet.RawDBForShardKey()`. Both prepare the object set before
+  returning handles and preserve its configured vault, tenant, shard order,
+  and CRC32 routing.
+- `TenantObjectSet.EnsurePrepared()` is for bootstrap code and for preparing
+  every participating object set before `Begin()`. Runtime raw reads should
+  use `RawDBs` or `RawDBForShardKey` rather than pairing `EnsurePrepared` with
+  the global `DBs` function.
 - `Open()`: Lazy initialization, idempotent (guarded by `sync.Once`).
 - `Close()`: Closes all connections, sets `dbs = nil`, resets the once-guard.
 - Connections are opened from config at `configKeyDatabase = "database"`.
@@ -159,6 +167,8 @@ The `prepare()` method:
 7. Stores table metadata in `typeToTable[vault][objType]`
 
 **Important**: Table creation happens on first access, not at program start.
+Call `EnsurePrepared()` when transaction setup must guarantee the tables exist
+before opening the transaction.
 
 ### Where Builder Pattern
 [where.go](where.go)
@@ -292,6 +302,9 @@ for _, compute := range tos.compute {
 - After unmarshaling object from database
 - Before returning to caller
 - Applied to all select operations (Select, SelectByID, SelectAll, Process)
+- Runtime rows whose `object` column is SQL `NULL` are absent from live-object
+  reads. `SelectByID` and `SelectByIDWithMetadata` return `(nil, nil)` for the
+  same SQL-NULL row shape as for a missing ID.
 
 **Use cases**:
 - Copy metadata fields to object (e.g., `obj.CreatedAt = md.CreatedAt`)
@@ -304,7 +317,8 @@ for _, compute := range tos.compute {
 
 ```go
 row := tx.QueryRow(`SELECT "object", "created_at", ...
-    FROM "`+tos.table.RuntimeTableName+`" WHERE "id"=$1`+lockClause, fromKey.ID)
+    FROM "`+tos.table.RuntimeTableName+`"
+    WHERE "id"=$1 AND "object" IS NOT NULL`+lockClause, fromKey.ID)
 ```
 
 - Engine-aware lock clause: `FOR UPDATE NOWAIT` on Postgres, empty on SQLite
@@ -324,7 +338,9 @@ row := tx.QueryRow(`SELECT "object", "created_at", ...
   Trade-off: a write that only advances metadata (no business change) does not
   trip the guard (no ABA-via-metadata detection).
 - Returns exported sentinels (`errors.Is`-friendly):
-  - `ErrObjectNotFound` when the row is missing.
+  - `ErrObjectNotFound` when the row is missing or its runtime `object` is SQL
+    `NULL`. This is classified before the caller-provided `from` value enters
+    the comparison pipeline.
   - `ErrLockNotAvailable` when `FOR UPDATE NOWAIT` raises SQLSTATE 55P03
     (classified via the unexported `sqlStateProvider` interface — works for
     both `lib/pq.Error` and `pgx`-style errors without a direct driver dep).
