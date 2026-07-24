@@ -148,7 +148,7 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) SelectByID(ctx convCtx.Context,
 		)
 
 		err = db.
-			QueryRow(`SELECT "object", "created_at", "created_by", "updated_at", "updated_by" FROM "`+tos.table.RuntimeTableName+`" WHERE id=$1`, id).
+			QueryRow(`SELECT "object", "created_at", "created_by", "updated_at", "updated_by" FROM "`+tos.table.RuntimeTableName+`" WHERE id=$1 AND "object" IS NOT NULL`, id).
 			Scan(&bytes, &md.CreatedAt, &md.CreatedBy, &md.UpdatedAt, &md.UpdatedBy)
 		if err == sql.ErrNoRows {
 			err = nil
@@ -156,6 +156,9 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) SelectByID(ctx convCtx.Context,
 		}
 		if err != nil {
 			return
+		}
+		if bytes == nil {
+			continue
 		}
 
 		obj = new(objT)
@@ -196,7 +199,7 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) SelectByIDWithMetadata(ctx conv
 		)
 
 		err = db.
-			QueryRow(`SELECT "object", "created_at", "created_by", "updated_at", "updated_by" FROM "`+tos.table.RuntimeTableName+`" WHERE id=$1`, id).
+			QueryRow(`SELECT "object", "created_at", "created_by", "updated_at", "updated_by" FROM "`+tos.table.RuntimeTableName+`" WHERE id=$1 AND "object" IS NOT NULL`, id).
 			Scan(&bytes, &md.CreatedAt, &md.CreatedBy, &md.UpdatedAt, &md.UpdatedBy)
 		if err == sql.ErrNoRows {
 			err = nil
@@ -204,6 +207,9 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) SelectByIDWithMetadata(ctx conv
 		}
 		if err != nil {
 			return
+		}
+		if bytes == nil {
+			continue
 		}
 
 		err = json.Unmarshal(bytes, &o)
