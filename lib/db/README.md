@@ -277,8 +277,12 @@ its business fields between load and call.
 ```go
 // Lock and select atomically
 obj, lock, err := objSet.Tenant(tenant).SelectByIDAndLock(ctx, id, "processing")
+if err != nil {
+    // If lock is non-nil, automatic cleanup failed; retry lock.Unlock().
+    return
+}
 if lock == nil {
-    // Someone else has the lock
+    // The object is absent, or someone else has the lock.
     return
 }
 defer lock.Unlock()
@@ -287,6 +291,12 @@ defer lock.Unlock()
 obj.Field = "updated"
 err = objSet.Tenant(tenant).Update(ctx, *obj)
 ```
+
+`SelectByIDAndLock` does not acquire locks for runtime rows whose `object`
+column is SQL `NULL`. Once it acquires a lock, any subsequent fetch or JSON
+decode failure triggers automatic cleanup. If cleanup also fails, the returned
+error contains both failures and the non-nil lock can be used to retry
+`Unlock`. Losing the acquisition race never removes the other caller's lock.
 
 ## Configuration
 
