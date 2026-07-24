@@ -49,6 +49,8 @@ type whereReady interface {
 type whereExpectingOperators interface {
 	Equals() whereExpectingValue
 	NotEquals() whereExpectingValue
+	IsNull() whereExpectingLogicalOperator
+	IsNotNull() whereExpectingLogicalOperator
 	GreaterThan() whereExpectingValue
 	GreaterThanOrEquals() whereExpectingValue
 	LessThan() whereExpectingValue
@@ -190,6 +192,22 @@ func (w *where) NotEquals() whereExpectingValue {
 		return w
 	}
 	w.query.WriteString(`!=`)
+	return w
+}
+
+func (w *where) IsNull() whereExpectingLogicalOperator {
+	if w.err != nil {
+		return w
+	}
+	w.query.WriteString(` IS NULL`)
+	return w
+}
+
+func (w *where) IsNotNull() whereExpectingLogicalOperator {
+	if w.err != nil {
+		return w
+	}
+	w.query.WriteString(` IS NOT NULL`)
 	return w
 }
 

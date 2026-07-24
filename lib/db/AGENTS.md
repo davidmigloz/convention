@@ -166,7 +166,8 @@ The `prepare()` method:
 The where builder uses a fluent interface with type state transitions:
 1. `whereExpectingFirstStatement`: Initial state, or after logical operator
 2. `whereExpectingOperators`: After `Key()` call
-3. `whereExpectingValue`: After comparison operator
+3. `whereExpectingValue`: After a value comparison operator; `IsNull()` and
+   `IsNotNull()` return directly to the logical-operator state
 4. `whereExpectingValues`: After `In()` or `NotIn()`
 5. `whereExpectingLogicalOperator`: After value, can add `And()`/`Or()` or ordering
 
@@ -191,6 +192,10 @@ func keyToJsonColumn(key string) string
 Converts dot notation to PostgreSQL JSONB operators:
 - `"field"` → `"object"->'field'`
 - `"address.city"` → `"object"->'address'->'city'`
+
+`IsNull()` / `IsNotNull()` apply SQL null predicates directly to that JSON
+path expression. Missing keys yield SQL `NULL`; explicit JSON `null` remains
+a JSONB value and does not match `IsNull()`.
 
 **Parameter Marshaling**:
 [where.go:240-252](where.go#L240-L252)
