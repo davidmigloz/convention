@@ -1,8 +1,11 @@
 package db_test
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -84,6 +87,52 @@ END`)
 	assertLockCleanupRow(t, db, id, "", false)
 }
 
+func Test_SelectByIDAndLock_post_acquisition_absence_wraps_ErrObjectNotFound(t *testing.T) {
+	tests := []struct {
+		name   string
+		id     LockCleanupID
+		action string
+	}{
+		{
+			name:   "missing row",
+			id:     LockCleanupID("missing-after-lock"),
+			action: `DELETE FROM "` + lockCleanupRuntimeTable + `" WHERE "id" = NEW."id";`,
+		},
+		{
+			name:   "SQL-NULL object",
+			id:     LockCleanupID("null-after-lock"),
+			action: `UPDATE "` + lockCleanupRuntimeTable + `" SET "object" = NULL WHERE "id" = NEW."id";`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, ctx := setupLockCleanupTest(t)
+			insertLockCleanupRuntimeObject(t, db, LockCleanupObject{ID: tt.id, Payload: "present"})
+			mustExecLockCleanup(t, db, `
+CREATE TRIGGER "`+dropRuntimeTrigger+`"
+AFTER INSERT ON "`+lockCleanupLockTable+`"
+WHEN NEW."id" = '`+string(tt.id)+`'
+BEGIN
+	`+tt.action+`
+END`)
+
+			obj, lock, err := lockCleanupDB.Tenant("test").SelectByIDAndLock(ctx, tt.id, "transient owner")
+
+			if !errors.Is(err, convDB.ErrObjectNotFound) {
+				t.Errorf("SelectByIDAndLock error = %v, want ErrObjectNotFound", err)
+			}
+			if obj != nil {
+				t.Errorf("SelectByIDAndLock returned object %#v after the object became absent", obj)
+			}
+			if lock != nil {
+				t.Errorf("SelectByIDAndLock returned lock %#v after cleanup succeeded", lock)
+			}
+			assertLockCleanupRow(t, db, tt.id, "", false)
+		})
+	}
+}
+
 func Test_SelectByIDAndLock_releases_lock_when_object_JSON_is_malformed(t *testing.T) {
 	db, ctx := setupLockCleanupTest(t)
 	id := LockCleanupID("malformed-object")
@@ -140,6 +189,44 @@ END`)
 		t.Error("SelectByIDAndLock discarded the lock handle after cleanup failed")
 	}
 	assertLockCleanupRow(t, db, id, "cleanup owner", true)
+}
+
+func Test_SelectByIDAndLock_logs_cleanup_failure_with_object_ID(t *testing.T) {
+	db, ctx := setupLockCleanupTest(t)
+	id := LockCleanupID("cleanup-log-failure")
+	insertLockCleanupRuntimeObject(t, db, LockCleanupObject{ID: id, Payload: "present"})
+	mustExecLockCleanup(t, db, `
+CREATE TRIGGER "`+dropRuntimeTrigger+`"
+AFTER INSERT ON "`+lockCleanupLockTable+`"
+WHEN NEW."id" = 'cleanup-log-failure'
+BEGIN
+	DELETE FROM "`+lockCleanupRuntimeTable+`" WHERE "id" = NEW."id";
+END`)
+	mustExecLockCleanup(t, db, `
+CREATE TRIGGER "`+refuseUnlockTrigger+`"
+BEFORE DELETE ON "`+lockCleanupLockTable+`"
+WHEN OLD."id" = 'cleanup-log-failure'
+BEGIN
+	SELECT RAISE(ABORT, 'unlock refused');
+END`)
+	var logOutput bytes.Buffer
+	ctx = ctx.WithLogger(slog.New(slog.NewJSONHandler(&logOutput, nil)))
+
+	_, _, err := lockCleanupDB.Tenant("test").SelectByIDAndLock(ctx, id, "cleanup owner")
+
+	if err == nil {
+		t.Fatal("SelectByIDAndLock returned nil error after fetch and cleanup failed")
+	}
+	logged := logOutput.String()
+	if logged == "" {
+		t.Fatal("cleanup failure produced no log record")
+	}
+	if !strings.Contains(logged, `"level":"ERROR"`) {
+		t.Errorf("cleanup failure log is not error-level: %s", logged)
+	}
+	if !strings.Contains(logged, string(id)) {
+		t.Errorf("cleanup failure log does not identify object %q: %s", id, logged)
+	}
 }
 
 func Test_SelectByIDAndLock_does_not_unlock_foreign_lock_when_acquisition_loses_race(t *testing.T) {
