@@ -93,6 +93,30 @@ func Test_RawDBs_prepares_and_preserves_vault_tenant_and_shard_order(t *testing.
 	}
 }
 
+func Test_RuntimeTableName_matches_the_table_prepared_for_raw_access(t *testing.T) {
+	tenantObjectSet := convDB.NewObjectSet[RawAccessObject]("messages").Ready().Tenant("test")
+
+	tableName := tenantObjectSet.RuntimeTableName()
+	if tableName != "raw_access_object" {
+		t.Fatalf("RuntimeTableName() = %q, want %q", tableName, "raw_access_object")
+	}
+
+	dbs, err := tenantObjectSet.RawDBs()
+	if err != nil {
+		t.Fatalf("RawDBs failed: %v", err)
+	}
+	for i, db := range dbs {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM "` + tableName + `"`).Scan(&count); err != nil {
+			t.Errorf("RuntimeTableName() did not identify the prepared table on shard %d: %v", i, err)
+		}
+	}
+
+	if got := tenantObjectSet.RuntimeTableName(); got != tableName {
+		t.Errorf("RuntimeTableName() changed after RawDBs(): got %q, want %q", got, tableName)
+	}
+}
+
 func Test_RawDBForShardKey_prepares_and_uses_the_standard_route(t *testing.T) {
 	objectSet := convDB.NewObjectSet[RawAccessObject]("messages").Ready()
 	all, err := objectSet.Tenant("test").RawDBs()
