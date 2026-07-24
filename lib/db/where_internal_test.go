@@ -237,28 +237,22 @@ func Test_where_statements(t *testing.T) {
 	}
 }
 
-func Test_where_separatesPredicateFromOrderAndLimit(t *testing.T) {
+func Test_where_separatesPredicateFromOrderLimitAndOffset(t *testing.T) {
 	where := Where().
 		Key("x").Equals().Value("good").
 		Or().CreatedBy("operator").
 		OrderByUpdatedAtAsc().
-		LimitPerShard(10)
+		LimitPerShard(10).
+		Offset(5)
 
-	parts, ok := any(where).(interface {
-		statementParts() (predicate string, tail string, params []any, err error)
-	})
-	if !ok {
-		t.Fatal("where statement must expose its predicate separately from ORDER BY, LIMIT, and OFFSET")
-	}
-
-	predicate, tail, params, err := parts.statementParts()
+	predicate, tail, params, err := where.statementParts()
 	if err != nil {
 		t.Fatalf("statementParts() failed: %v", err)
 	}
 	if predicate != `"object"->'x'=$1 OR "created_by" = $2` {
 		t.Fatalf("unexpected predicate: %q", predicate)
 	}
-	if tail != `ORDER BY "updated_at" ASC LIMIT 10` {
+	if tail != `ORDER BY "updated_at" ASC LIMIT 10 OFFSET 5` {
 		t.Fatalf("unexpected statement tail: %q", tail)
 	}
 	if !reflect.DeepEqual(params, []any{`"good"`, "operator"}) {
@@ -269,7 +263,7 @@ func Test_where_separatesPredicateFromOrderAndLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runtimeObjectWhereStatement() failed: %v", err)
 	}
-	want := `"object" IS NOT NULL AND ("object"->'x'=$1 OR "created_by" = $2) ORDER BY "updated_at" ASC LIMIT 10`
+	want := `"object" IS NOT NULL AND ("object"->'x'=$1 OR "created_by" = $2) ORDER BY "updated_at" ASC LIMIT 10 OFFSET 5`
 	if filtered != want {
 		t.Fatalf("unexpected filtered statement:\n got %q\nwant %q", filtered, want)
 	}

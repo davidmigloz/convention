@@ -112,6 +112,13 @@ func (w *where) statementParts() (predicate string, tail string, params []any, e
 	return w.query.String(), w.tail.String(), w.params, w.err
 }
 
+func (w *where) appendTail(clause string) {
+	if w.tail.Len() > 0 {
+		w.tail.WriteRune(' ')
+	}
+	w.tail.WriteString(clause)
+}
+
 func (w *where) Noop() whereExpectingLogicalOperator {
 	if w.err != nil {
 		return w
@@ -381,7 +388,7 @@ func (w *where) OrderByCreatedAtAsc() whereOrdered {
 	if w.err != nil {
 		return w
 	}
-	w.tail.WriteString(`ORDER BY "created_at" ASC`)
+	w.appendTail(`ORDER BY "created_at" ASC`)
 	return w
 }
 
@@ -389,7 +396,7 @@ func (w *where) OrderByCreatedAtDesc() whereOrdered {
 	if w.err != nil {
 		return w
 	}
-	w.tail.WriteString(`ORDER BY "created_at" DESC`)
+	w.appendTail(`ORDER BY "created_at" DESC`)
 	return w
 }
 
@@ -397,7 +404,7 @@ func (w *where) OrderByUpdatedAtAsc() whereOrdered {
 	if w.err != nil {
 		return w
 	}
-	w.tail.WriteString(`ORDER BY "updated_at" ASC`)
+	w.appendTail(`ORDER BY "updated_at" ASC`)
 	return w
 }
 
@@ -405,7 +412,7 @@ func (w *where) OrderByUpdatedAtDesc() whereOrdered {
 	if w.err != nil {
 		return w
 	}
-	w.tail.WriteString(`ORDER BY "updated_at" DESC`)
+	w.appendTail(`ORDER BY "updated_at" DESC`)
 	return w
 }
 
@@ -413,7 +420,7 @@ func (w *where) OrderByAsc(key string) whereOrdered {
 	if w.err != nil {
 		return w
 	}
-	w.tail.WriteString(`ORDER BY ` + keyToJsonColumn(key) + ` ASC`)
+	w.appendTail(`ORDER BY ` + keyToJsonColumn(key) + ` ASC`)
 	return w
 }
 
@@ -421,7 +428,7 @@ func (w *where) OrderByDesc(key string) whereOrdered {
 	if w.err != nil {
 		return w
 	}
-	w.tail.WriteString(`ORDER BY ` + keyToJsonColumn(key) + ` DESC`)
+	w.appendTail(`ORDER BY ` + keyToJsonColumn(key) + ` DESC`)
 	return w
 }
 
@@ -429,7 +436,7 @@ func (w *where) LimitPerShard(limit int) whereLimited {
 	if w.err != nil {
 		return w
 	}
-	w.tail.WriteString(` LIMIT ` + strconv.Itoa(limit))
+	w.appendTail(`LIMIT ` + strconv.Itoa(limit))
 	return w
 }
 
@@ -437,7 +444,7 @@ func (w *where) Offset(offset int) whereClosed {
 	if w.err != nil {
 		return w
 	}
-	w.tail.WriteString(` OFFSET ` + strconv.Itoa(offset))
+	w.appendTail(`OFFSET ` + strconv.Itoa(offset))
 
 	return w
 }
