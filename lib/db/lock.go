@@ -445,6 +445,13 @@ ON CONFLICT ("id") DO NOTHING;`,
 			cleanupErr := lock.Unlock()
 			if cleanupErr == nil {
 				lock = nil
+			} else {
+				ctx.Logger().Error(
+					"failed to release acquired lock after object load failure",
+					"object_id", id,
+					"error", cleanupErr,
+					"cause", cause,
+				)
 			}
 			return errors.Join(cause, cleanupErr)
 		}
@@ -455,7 +462,7 @@ ON CONFLICT ("id") DO NOTHING;`,
 			QueryRow(`SELECT "object" FROM "`+tos.table.RuntimeTableName+`" WHERE id=$1 AND "object" IS NOT NULL`, id).
 			Scan(&bytes)
 		if err == sql.ErrNoRows {
-			err = fmt.Errorf("object not found, even though lock was acquired")
+			err = fmt.Errorf("%w: id=%s", ErrObjectNotFound, id)
 		}
 		if err != nil {
 			err = releaseAcquiredLock(err)
