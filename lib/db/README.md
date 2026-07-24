@@ -316,6 +316,9 @@ the typed query API:
 ```go
 tenantObjects := objSet.Tenant(tenant)
 
+// Derived from the object type with the same rule used during preparation.
+table := tenantObjects.RuntimeTableName()
+
 // Bootstrap or prepare every participating object set before Begin().
 err := tenantObjects.EnsurePrepared()
 
@@ -330,6 +333,9 @@ Runtime raw reads should use `RawDBs` or `RawDBForShardKey`; do not combine
 `EnsurePrepared` with the global `DBs` function. For a transaction spanning
 multiple object sets, call `EnsurePrepared` on every participant before
 `Begin()` because preparation may issue DDL outside the transaction.
+Use `RuntimeTableName` when constructing SQL instead of hardcoding the derived
+name, so a Go object-type rename cannot silently leave the raw query pointing
+at an old table.
 
 Raw full-object queries remain responsible for selecting only live rows with
 a root `"object" IS NOT NULL` predicate and for treating a nil scanned object

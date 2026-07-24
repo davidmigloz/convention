@@ -124,6 +124,10 @@ Simple modulo distribution using CRC32 checksum. This provides:
   `TenantObjectSet.RawDBForShardKey()`. Both prepare the object set before
   returning handles and preserve its configured vault, tenant, shard order,
   and CRC32 routing.
+- Raw SQL must obtain its derived runtime table name from
+  `TenantObjectSet.RuntimeTableName()` rather than duplicating the snake-case
+  type-name convention. The accessor is deterministic and does not require
+  preparation.
 - `TenantObjectSet.EnsurePrepared()` is for bootstrap code and for preparing
   every participating object set before `Begin()`. Runtime raw reads should
   use `RawDBs` or `RawDBForShardKey` rather than pairing `EnsurePrepared` with

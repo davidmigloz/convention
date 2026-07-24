@@ -270,6 +270,10 @@ type TenantObjectSet[objT Object[idT, shardKeyT], idT, shardKeyT ~string] struct
 	tenant convAuth.Tenant
 }
 
+func (tos TenantObjectSet[objT, idT, shardKeyT]) RuntimeTableName() string {
+	return toSnakeCase(tos.objType.Name())
+}
+
 func (tos TenantObjectSet[objT, idT, shardKeyT]) EnsurePrepared() error {
 	if err := tos.prepare(); err != nil {
 		return err
