@@ -269,3 +269,29 @@ type TenantObjectSet[objT Object[idT, shardKeyT], idT, shardKeyT ~string] struct
 	objectSet[objT, idT, shardKeyT]
 	tenant convAuth.Tenant
 }
+
+func (tos TenantObjectSet[objT, idT, shardKeyT]) RuntimeTableName() string {
+	return toSnakeCase(tos.objType.Name())
+}
+
+func (tos TenantObjectSet[objT, idT, shardKeyT]) EnsurePrepared() error {
+	if err := tos.prepare(); err != nil {
+		return err
+	}
+	_, err := DBs(tos.vault, tos.tenant)
+	return err
+}
+
+func (tos TenantObjectSet[objT, idT, shardKeyT]) RawDBs() ([]*sql.DB, error) {
+	if err := tos.prepare(); err != nil {
+		return nil, err
+	}
+	return DBs(tos.vault, tos.tenant)
+}
+
+func (tos TenantObjectSet[objT, idT, shardKeyT]) RawDBForShardKey(shardKey shardKeyT) (*sql.DB, error) {
+	if err := tos.prepare(); err != nil {
+		return nil, err
+	}
+	return dbByShardKey(tos.vault, tos.tenant, string(shardKey))
+}

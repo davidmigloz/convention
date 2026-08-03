@@ -189,6 +189,10 @@ objsWithMd, err := objSet.Tenant(tenant).SelectAllWithMetadata(ctx)
 objWithMd, err := objSet.Tenant(tenant).SelectByIDWithMetadata(ctx, id)
 ```
 
+Live-object reads ignore runtime rows whose `object` column is SQL `NULL`.
+`SelectByID` and `SelectByIDWithMetadata` return `(nil, nil)` for those rows,
+the same as for a missing ID.
+
 ### Update Operations
 
 ```go
@@ -258,7 +262,7 @@ case errors.Is(err, db.ErrCASConflict):
 
 | Error                 | Cause                                                         | Typical HTTP |
 |-----------------------|---------------------------------------------------------------|--------------|
-| `ErrObjectNotFound`   | Row missing for the given ID                                  | 404          |
+| `ErrObjectNotFound`   | Row missing or runtime object is SQL `NULL`                    | 404          |
 | `ErrLockNotAvailable` | Another transaction holds `FOR UPDATE NOWAIT` on the row      | 409          |
 | `ErrCASConflict`      | Row mutated between caller's load and `SafeUpdate`            | 409          |
 
@@ -303,6 +307,39 @@ distinguishes that race from an object that was already absent, which returns
 also fails, Convention logs the failure with the object ID, returns both
 errors, and keeps the lock non-nil so the caller can retry `Unlock`. Losing the
 acquisition race never removes the other caller's lock.
+
+## Raw SQL Access
+
+Use tenant-bound object-set methods when an operation cannot be expressed by
+the typed query API:
+
+```go
+tenantObjects := objSet.Tenant(tenant)
+
+// Derived from the object type with the same rule used during preparation.
+table := tenantObjects.RuntimeTableName()
+
+// Bootstrap or prepare every participating object set before Begin().
+err := tenantObjects.EnsurePrepared()
+
+// Prepared, vault- and tenant-correct access to every configured shard.
+dbs, err := tenantObjects.RawDBs()
+
+// Prepared access to the shard selected by the standard CRC32 route.
+db, err := tenantObjects.RawDBForShardKey(shardKey)
+```
+
+Runtime raw reads should use `RawDBs` or `RawDBForShardKey`; do not combine
+`EnsurePrepared` with the global `DBs` function. For a transaction spanning
+multiple object sets, call `EnsurePrepared` on every participant before
+`Begin()` because preparation may issue DDL outside the transaction.
+Use `RuntimeTableName` when constructing SQL instead of hardcoding the derived
+name, so a Go object-type rename cannot silently leave the raw query pointing
+at an old table.
+
+Raw full-object queries remain responsible for selecting only live rows with
+a root `"object" IS NOT NULL` predicate and for treating a nil scanned object
+as absent.
 
 ## Configuration
 
