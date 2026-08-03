@@ -349,6 +349,19 @@ embedded audit stamps need not match — only business fields do.
 
 `Lock(ctx, obj, desc, opts ...LockOption)` has two modes selected by `WithLease`.
 
+`SelectByIDAndLock` treats a runtime row whose `object` column is SQL `NULL` as
+absent and does not acquire a lock for it. It checks the live-object predicate
+again after acquiring the sticky lock to close the read-to-lock race. If the
+post-acquisition fetch reports a missing or SQL-NULL row, it returns
+`ErrObjectNotFound` and releases the lock. This differs deliberately from an
+initially absent row's `(nil, nil, nil)`: the error records that a live row
+vanished after this call won lock acquisition. JSON decode failures use the
+same cleanup path. A cleanup failure is joined with the original error, logged
+at the failure site with the object ID, and returns the non-nil lock so the
+caller can retry cleanup.
+`RowsAffected()==0` means another caller owns the lock and never triggers
+cleanup.
+
 **Default mode (sticky mutex — unchanged):**
 ```go
 res, err := db.Exec(`INSERT INTO "`+tos.table.LockTableName+`"

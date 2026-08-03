@@ -401,7 +401,7 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) SelectByIDAndLock(ctx convCtx.C
 		}
 
 		var exists bool
-		err = db.QueryRow(`SELECT EXISTS(SELECT 1 FROM "`+tos.table.RuntimeTableName+`" WHERE id = $1)`, id).
+		err = db.QueryRow(`SELECT EXISTS(SELECT 1 FROM "`+tos.table.RuntimeTableName+`" WHERE id = $1 AND "object" IS NOT NULL)`, id).
 			Scan(&exists)
 		if err == sql.ErrNoRows {
 			err = nil
@@ -440,24 +440,43 @@ ON CONFLICT ("id") DO NOTHING;`,
 			id:  id,
 		}
 
+		releaseAcquiredLock := func(cause error) error {
+			obj = nil
+			cleanupErr := lock.Unlock()
+			if cleanupErr == nil {
+				lock = nil
+			} else {
+				ctx.Logger().Error(
+					"failed to release acquired lock after object load failure",
+					"object_id", id,
+					"error", cleanupErr,
+					"cause", cause,
+				)
+			}
+			return errors.Join(cause, cleanupErr)
+		}
+
 		var bytes []byte
 
 		err = db.
-			QueryRow(`SELECT "object" FROM "`+tos.table.RuntimeTableName+`" WHERE id=$1`, id).
+			QueryRow(`SELECT "object" FROM "`+tos.table.RuntimeTableName+`" WHERE id=$1 AND "object" IS NOT NULL`, id).
 			Scan(&bytes)
 		if err == sql.ErrNoRows {
-			err = fmt.Errorf("object not found, even though lock was acquired")
+			err = fmt.Errorf("%w: id=%s", ErrObjectNotFound, id)
 		}
 		if err != nil {
+			err = releaseAcquiredLock(err)
 			return
 		}
 
 		obj = new(objT)
 		err = json.Unmarshal(bytes, obj)
 		if err != nil {
+			err = releaseAcquiredLock(err)
 			return
 		}
 
+		return
 	}
 	return
 }

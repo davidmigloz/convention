@@ -277,8 +277,15 @@ its business fields between load and call.
 ```go
 // Lock and select atomically
 obj, lock, err := objSet.Tenant(tenant).SelectByIDAndLock(ctx, id, "processing")
+if err != nil {
+    if lock != nil {
+        // Automatic cleanup failed. Retry before dropping the handle.
+        _ = lock.Unlock()
+    }
+    return
+}
 if lock == nil {
-    // Someone else has the lock
+    // The object is absent, or someone else has the lock.
     return
 }
 defer lock.Unlock()
@@ -287,6 +294,15 @@ defer lock.Unlock()
 obj.Field = "updated"
 err = objSet.Tenant(tenant).Update(ctx, *obj)
 ```
+
+`SelectByIDAndLock` does not acquire locks for runtime rows whose `object`
+column is SQL `NULL`. An object that disappears or becomes SQL `NULL` after
+lock acquisition returns `ErrObjectNotFound` and triggers cleanup; the error
+distinguishes that race from an object that was already absent, which returns
+`(nil, nil, nil)`. JSON decode failures use the same cleanup path. If cleanup
+also fails, Convention logs the failure with the object ID, returns both
+errors, and keeps the lock non-nil so the caller can retry `Unlock`. Losing the
+acquisition race never removes the other caller's lock.
 
 ## Configuration
 
