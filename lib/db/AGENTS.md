@@ -166,15 +166,21 @@ The `prepare()` method:
 The where builder uses a fluent interface with type state transitions:
 1. `whereExpectingFirstStatement`: Initial state, or after logical operator
 2. `whereExpectingOperators`: After `Key()` call
-3. `whereExpectingValue`: After comparison operator
+3. `whereExpectingValue`: After a value comparison operator; `IsNull()` and
+   `IsNotNull()` return directly to the logical-operator state
 4. `whereExpectingValues`: After `In()` or `NotIn()`
 5. `whereExpectingLogicalOperator`: After value, can add `And()`/`Or()` or ordering
 
 **SQL Generation**:
-- Query string built with `strings.Builder`
+- Predicate and `ORDER BY` / `LIMIT` / `OFFSET` tail are built separately,
+  then combined by `statement()` for callers that need the original complete
+  statement
 - Parameters stored in slice
 - Parameter placeholders: `$1`, `$2`, etc. (PostgreSQL style)
 - `statement()` method returns `(query, params, error)`
+- Filtered collection reads use the separated parts to emit
+  `"object" IS NOT NULL AND (<predicate>) <tail>`, preserving the caller's
+  top-level `OR` semantics without allowing it to bypass the live-object guard
 
 **Error latching**: the builder latches the first error into `w.err` (empty
 key, `json.Marshal` failure, error propagated from an inner `Expression`) and
@@ -192,8 +198,14 @@ Converts dot notation to PostgreSQL JSONB operators:
 - `"field"` → `"object"->'field'`
 - `"address.city"` → `"object"->'address'->'city'`
 
+`IsNull()` / `IsNotNull()` apply SQL null predicates directly to that JSON
+path expression. Missing keys yield SQL `NULL`; explicit JSON `null` remains
+a JSONB value and does not match `IsNull()`. A nil Go pointer without
+`omitempty` is stored as explicit JSON `null`; query that representation with
+`Key("field").Equals().Value(nil)`.
+
 **Parameter Marshaling**:
-[where.go:240-252](where.go#L240-L252)
+[where.go:270-281](where.go#L270-L281)
 
 All values are JSON-marshaled before being added to params:
 ```go
@@ -433,7 +445,7 @@ When shard keys provided:
 Without shard keys: Returns all databases for tenant.
 
 ### Text Search
-[where.go:291-299](where.go#L291-L299)
+[where.go:321-328](where.go#L321-L328)
 
 ```go
 func (w *where) Search(text string) whereExpectingLogicalOperator {
@@ -446,7 +458,7 @@ func (w *where) Search(text string) whereExpectingLogicalOperator {
 }
 ```
 
-**Text search preprocessing** ([where.go:401-416](where.go#L401-L416)):
+**Text search preprocessing** ([where.go:431-444](where.go#L431-L444)):
 ```go
 var whitespacePattern = regexp.MustCompile(`\s+`)
 
@@ -500,12 +512,17 @@ Contract:
 **Select** ([select.go:220-281](select.go#L220-L281)):
 - Loads all results into memory
 - Returns slice
+- `Select`, `SelectWithMetadata`, `SelectAll`, and
+  `SelectAllWithMetadata` exclude runtime rows whose `object` column is SQL
+  `NULL`; the same defensive check is applied after scanning
 - Good for small/medium result sets
 
 **Process** ([process.go:11-70](process.go#L11-L70)):
 - Streams results via callback
 - No intermediate storage
 - Returns count of processed items
+- `Process` and `ProcessWithMetadata` apply the same SQL and post-scan
+  live-object checks as `Select`
 - Good for large result sets or when transformation is needed
 
 ```go

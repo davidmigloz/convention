@@ -21,6 +21,8 @@ func Test_where_preservesLatchedError(t *testing.T) {
 		{"Key", func(w *where) { w.Key("k") }},
 		{"Equals", func(w *where) { w.Equals() }},
 		{"NotEquals", func(w *where) { w.NotEquals() }},
+		{"IsNull", func(w *where) { w.IsNull() }},
+		{"IsNotNull", func(w *where) { w.IsNotNull() }},
 		{"GreaterThan", func(w *where) { w.GreaterThan() }},
 		{"GreaterThanOrEquals", func(w *where) { w.GreaterThanOrEquals() }},
 		{"LessThan", func(w *where) { w.LessThan() }},
@@ -156,6 +158,28 @@ func Test_where_statements(t *testing.T) {
 			[]any{"2", "3"},
 		},
 		{
+			"is_null_and_is_null",
+			func() whereReady {
+				return Where().Key("completed_at").IsNull().
+					And().Key("abandoned_at").IsNull().
+					OrderByUpdatedAtAsc().LimitPerShard(10)
+			},
+			`"object"->'completed_at' IS NULL AND "object"->'abandoned_at' IS NULL ORDER BY "updated_at" ASC LIMIT 10`,
+			nil,
+		},
+		{
+			"is_not_null_nested",
+			func() whereReady { return Where().Key("management.managing_entity").IsNotNull() },
+			`"object"->'management'->'managing_entity' IS NOT NULL`,
+			nil,
+		},
+		{
+			"equals_explicit_json_null",
+			func() whereReady { return Where().Key("deleted_at").Equals().Value(nil) },
+			`"object"->'deleted_at'=$1`,
+			[]any{"null"},
+		},
+		{
 			"in_values",
 			func() whereReady { return Where().Key("x").In().Values("a", 5) },
 			`"object"->'x' IN ($1,$2)`,
@@ -210,6 +234,41 @@ func Test_where_statements(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func Test_where_separatesPredicateFromOrderLimitAndOffset(t *testing.T) {
+	where := Where().
+		Key("x").Equals().Value("good").
+		Or().CreatedBy("operator").
+		OrderByUpdatedAtAsc().
+		LimitPerShard(10).
+		Offset(5)
+
+	predicate, tail, params, err := where.statementParts()
+	if err != nil {
+		t.Fatalf("statementParts() failed: %v", err)
+	}
+	if predicate != `"object"->'x'=$1 OR "created_by" = $2` {
+		t.Fatalf("unexpected predicate: %q", predicate)
+	}
+	if tail != `ORDER BY "updated_at" ASC LIMIT 10 OFFSET 5` {
+		t.Fatalf("unexpected statement tail: %q", tail)
+	}
+	if !reflect.DeepEqual(params, []any{`"good"`, "operator"}) {
+		t.Fatalf("unexpected params: %#v", params)
+	}
+
+	filtered, filteredParams, err := runtimeObjectWhereStatement(where)
+	if err != nil {
+		t.Fatalf("runtimeObjectWhereStatement() failed: %v", err)
+	}
+	want := `"object" IS NOT NULL AND ("object"->'x'=$1 OR "created_by" = $2) ORDER BY "updated_at" ASC LIMIT 10 OFFSET 5`
+	if filtered != want {
+		t.Fatalf("unexpected filtered statement:\n got %q\nwant %q", filtered, want)
+	}
+	if !reflect.DeepEqual(filteredParams, params) {
+		t.Fatalf("filtered params mismatch:\n got %#v\nwant %#v", filteredParams, params)
 	}
 }
 

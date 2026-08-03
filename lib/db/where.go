@@ -26,29 +26,36 @@ type whereExpectingFirstStatement interface {
 	Expression(where whereExpectingLogicalOperator) whereExpectingLogicalOperator
 }
 
-type whereClosed interface {
+type whereStatement interface {
 	statement() (string, []any, error)
+	statementParts() (predicate string, tail string, params []any, err error)
+}
+
+type whereClosed interface {
+	whereStatement
 }
 
 type whereOrdered interface {
-	statement() (string, []any, error)
+	whereStatement
 
 	LimitPerShard(limit int) whereLimited
 }
 
 type whereLimited interface {
-	statement() (string, []any, error)
+	whereStatement
 
 	Offset(offset int) whereClosed
 }
 
 type whereReady interface {
-	statement() (string, []any, error)
+	whereStatement
 }
 
 type whereExpectingOperators interface {
 	Equals() whereExpectingValue
 	NotEquals() whereExpectingValue
+	IsNull() whereExpectingLogicalOperator
+	IsNotNull() whereExpectingLogicalOperator
 	GreaterThan() whereExpectingValue
 	GreaterThanOrEquals() whereExpectingValue
 	LessThan() whereExpectingValue
@@ -69,7 +76,7 @@ type whereExpectingLogicalOperator interface {
 	OrderByUpdatedAtDesc() whereOrdered
 	OrderByUpdatedAtAsc() whereOrdered
 
-	statement() (string, []any, error)
+	whereStatement
 }
 
 type whereExpectingValue interface {
@@ -85,15 +92,31 @@ type whereExpectingValues interface {
 // discarded rather than assigned over a previously latched error.
 type where struct {
 	query  strings.Builder
+	tail   strings.Builder
 	params []any
 	err    error
 }
 
 func (w *where) statement() (string, []any, error) {
-	if w == nil {
-		return "", nil, errors.New("where statement is nil")
+	predicate, tail, params, err := w.statementParts()
+	if tail == "" {
+		return predicate, params, err
 	}
-	return w.query.String(), w.params, w.err
+	return predicate + " " + tail, params, err
+}
+
+func (w *where) statementParts() (predicate string, tail string, params []any, err error) {
+	if w == nil {
+		return "", "", nil, errors.New("where statement is nil")
+	}
+	return w.query.String(), w.tail.String(), w.params, w.err
+}
+
+func (w *where) appendTail(clause string) {
+	if w.tail.Len() > 0 {
+		w.tail.WriteRune(' ')
+	}
+	w.tail.WriteString(clause)
 }
 
 func (w *where) Noop() whereExpectingLogicalOperator {
@@ -190,6 +213,22 @@ func (w *where) NotEquals() whereExpectingValue {
 		return w
 	}
 	w.query.WriteString(`!=`)
+	return w
+}
+
+func (w *where) IsNull() whereExpectingLogicalOperator {
+	if w.err != nil {
+		return w
+	}
+	w.query.WriteString(` IS NULL`)
+	return w
+}
+
+func (w *where) IsNotNull() whereExpectingLogicalOperator {
+	if w.err != nil {
+		return w
+	}
+	w.query.WriteString(` IS NOT NULL`)
 	return w
 }
 
@@ -349,7 +388,7 @@ func (w *where) OrderByCreatedAtAsc() whereOrdered {
 	if w.err != nil {
 		return w
 	}
-	w.query.WriteString(` ORDER BY "created_at" ASC`)
+	w.appendTail(`ORDER BY "created_at" ASC`)
 	return w
 }
 
@@ -357,7 +396,7 @@ func (w *where) OrderByCreatedAtDesc() whereOrdered {
 	if w.err != nil {
 		return w
 	}
-	w.query.WriteString(` ORDER BY "created_at" DESC`)
+	w.appendTail(`ORDER BY "created_at" DESC`)
 	return w
 }
 
@@ -365,7 +404,7 @@ func (w *where) OrderByUpdatedAtAsc() whereOrdered {
 	if w.err != nil {
 		return w
 	}
-	w.query.WriteString(` ORDER BY "updated_at" ASC`)
+	w.appendTail(`ORDER BY "updated_at" ASC`)
 	return w
 }
 
@@ -373,7 +412,7 @@ func (w *where) OrderByUpdatedAtDesc() whereOrdered {
 	if w.err != nil {
 		return w
 	}
-	w.query.WriteString(` ORDER BY "updated_at" DESC`)
+	w.appendTail(`ORDER BY "updated_at" DESC`)
 	return w
 }
 
@@ -381,7 +420,7 @@ func (w *where) OrderByAsc(key string) whereOrdered {
 	if w.err != nil {
 		return w
 	}
-	w.query.WriteString(` ORDER BY ` + keyToJsonColumn(key) + ` ASC`)
+	w.appendTail(`ORDER BY ` + keyToJsonColumn(key) + ` ASC`)
 	return w
 }
 
@@ -389,7 +428,7 @@ func (w *where) OrderByDesc(key string) whereOrdered {
 	if w.err != nil {
 		return w
 	}
-	w.query.WriteString(` ORDER BY ` + keyToJsonColumn(key) + ` DESC`)
+	w.appendTail(`ORDER BY ` + keyToJsonColumn(key) + ` DESC`)
 	return w
 }
 
@@ -397,7 +436,7 @@ func (w *where) LimitPerShard(limit int) whereLimited {
 	if w.err != nil {
 		return w
 	}
-	w.query.WriteString(` LIMIT ` + strconv.Itoa(limit))
+	w.appendTail(`LIMIT ` + strconv.Itoa(limit))
 	return w
 }
 
@@ -405,7 +444,7 @@ func (w *where) Offset(offset int) whereClosed {
 	if w.err != nil {
 		return w
 	}
-	w.query.WriteString(` OFFSET ` + strconv.Itoa(offset))
+	w.appendTail(`OFFSET ` + strconv.Itoa(offset))
 
 	return w
 }
