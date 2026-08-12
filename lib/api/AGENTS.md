@@ -103,15 +103,47 @@ API error with full context:
 
 ```go
 type Error struct {
-    URL     string    `json:"url,omitempty"`
-    Method  string    `json:"method,omitempty"`
-    Status  int       `json:"status,omitempty"`
-    Code    ErrorCode `json:"code,omitempty"`
-    Scope   string    `json:"scope,omitempty"`
-    Message string    `json:"message,omitempty"`
-    Inner   *Error    `json:"inner,omitempty"`
+    URL      string    `json:"url,omitempty"`
+    Method   string    `json:"method,omitempty"`
+    Status   int       `json:"status,omitempty"`
+    Code     ErrorCode `json:"code,omitempty"`
+    Scope    string    `json:"scope,omitempty"`
+    Workflow string    `json:"workflow,omitempty"`
+    Message  string    `json:"message,omitempty"`
+    Inner    *Error    `json:"inner,omitempty"`
+
+    detail error // internal cause; never serialised
 }
 ```
+
+#### Client visible projection
+
+`serveError` never writes the struct above to the response. It writes
+`publicView()`, which carries **only** `url`, `method`, `status`, `code`,
+`message` and `workflow`. `Scope`, `Inner` and `detail` are dropped, because they
+carry the internal call graph, scope arguments (frequently PII) and driver level
+text such as Postgres table and column names.
+
+The full chain is written to the log instead, by `serveError`, at `Error` level
+for 5xx and `Warn` level for 4xx. **This log record is the only remaining copy of
+the diagnostic** — do not remove or downgrade it.
+
+`Workflow` is retained on the wire on purpose: it is the correlation key between
+a sanitised client response and the complete server side log record.
+
+#### Passing causes
+
+`NewError`/`ServeError` accept any `inner error`:
+
+- a `*Error` or `Error` becomes the structured `Inner` (kept server-side)
+- anything else is retained in the unexported `detail` field
+
+`Message` is never mutated by the inner error. `Error()` renders the whole chain
+for logging; `errors.Is`/`errors.As` traverse it via `Unwrap`, so services can
+still branch on sentinel causes such as `convDB.ErrObjectNotFound`.
+
+Because the library sanitises unconditionally, a handler that bare-returns a
+database error (`if err != nil { return }`) is no longer a disclosure risk.
 
 ## Handler Pattern
 
@@ -284,13 +316,21 @@ Test files:
 - `openapi_test.go` - OpenAPI generation tests
 - `descriptor_test.go` - URL parsing/matching tests
 - `error_test.go` - Error handling tests
+- `error_leak_test.go` - Regression tests asserting no internal detail is serialised
+- `error_remote_internal_test.go` - Service-to-service relay sanitisation (internal package)
 - `main_test.go` - Test setup
+
+`TestMain` calls `convCfg.SetConfigLocation("../../.secret")` and **panics if that
+folder is missing**. `.secret` is gitignored, so a fresh clone has to create it.
+`mkdir .secret` is enough for the error tests; the server and OpenAPI tests
+additionally need `communication_secret` plus a system-trusted
+`communication_certificate`/`communication_key` pair.
 
 ## Implementation Notes
 
 1. **Path parameters must be `~string`**: Constraint ensures type safety while allowing custom string types
 2. **Handlers are value receivers for builders, pointer receivers for execution**: `WithPreCheck` returns new instance, `execIfMatch` modifies internal state
 3. **OpenAPI caches YAML**: First request generates, subsequent requests return cached
-4. **Errors preserve chain**: `Inner` field maintains error hierarchy across service calls
+4. **Errors preserve chain server-side only**: `Inner` and `detail` maintain the error hierarchy in-process and in logs; the client only ever receives the outer `code`/`message`/`status` plus `workflow` (see [Error](#error))
 5. **Context propagated via headers**: Workflow ID, agent, claims sent in HTTP headers
 6. **TLS required for server**: Uses certificates from config paths `communication_certificate` and `communication_key`

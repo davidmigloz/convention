@@ -245,6 +245,55 @@ if err != nil {
 }
 ```
 
+### What the client receives
+
+Error responses are sanitised. The body carries only the outer error:
+
+```json
+{
+  "url": "/user/123",
+  "method": "GET",
+  "status": 500,
+  "code": "internal_error",
+  "message": "unexpected error",
+  "workflow": "9f1c2f7a-2b4e-4a91-9b0e-1d2c3e4f5a6b"
+}
+```
+
+The scope chain, the inner error chain and any non-convention cause (database
+driver text, third party client errors) are **never** serialised. They are
+written to the server log instead, keyed by the same `workflow` ID, so support
+can retrieve the full diagnostic from a response the user pasted in.
+
+This means you can safely bare-return internal errors from a handler:
+
+```go
+func handleGetUser(ctx convCtx.Context, id UserID) (user User, err error) {
+    ctx = ctx.WithScope("handleGetUser", "id", id)
+    defer ctx.Exit(&err)
+
+    // a convDB error here reaches the client as a generic 500;
+    // the driver text stays in the log
+    return convDB.SelectByID[User](ctx, id)
+}
+```
+
+Give the client a useful message by supplying one explicitly — the cause can be
+passed as `inner` without risk, it is kept for logging only:
+
+```go
+return convAPI.NewError(ctx, http.StatusNotFound, convAPI.ErrorCodeNotFound, "user not found", err)
+```
+
+`errors.Is` and `errors.As` traverse the retained cause, so branching on sentinel
+errors still works:
+
+```go
+if errors.Is(err, convDB.ErrObjectNotFound) {
+    return convAPI.NewError(ctx, http.StatusNotFound, convAPI.ErrorCodeNotFound, "user not found", err)
+}
+```
+
 ## Server Creation
 
 ### Full Server with TLS

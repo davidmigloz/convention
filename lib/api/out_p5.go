@@ -66,7 +66,7 @@ func (x *OutP5[outT, p1T, p2T, p3T, p4T, p5T]) execIfMatch(ctx convCtx.Context, 
 	if err != nil {
 		var apiErr *Error
 		if errors.As(err, &apiErr) {
-			serveError(w, apiErr)
+			serveError(ctx, w, apiErr)
 		} else {
 			ServeError(ctx, w, http.StatusInternalServerError, ErrorCodeInternalError, "unexpected error", err)
 		}

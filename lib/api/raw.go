@@ -22,7 +22,7 @@ func (x Raw) WithPreCheck(check Check) Raw {
 			if err != nil {
 				var apiErr *Error
 				if errors.As(err, &apiErr) {
-					serveError(w, apiErr)
+					serveError(ctx, w, apiErr)
 				} else {
 					ServeError(ctx, w, http.StatusInternalServerError, ErrorCodeInternalError, "unexpected error", err)
 				}

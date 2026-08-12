@@ -22,7 +22,7 @@ func (x RawP5[p1T, p2T, p3T, p4T, p5T]) WithPreCheck(check Check) RawP5[p1T, p2T
 			if err != nil {
 				var apiErr *Error
 				if errors.As(err, &apiErr) {
-					serveError(w, apiErr)
+					serveError(ctx, w, apiErr)
 				} else {
 					ServeError(ctx, w, http.StatusInternalServerError, ErrorCodeInternalError, "unexpected error", err)
 				}

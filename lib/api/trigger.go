@@ -54,7 +54,7 @@ func (x *Trigger) execIfMatch(ctx convCtx.Context, w http.ResponseWriter, r *htt
 	if err != nil {
 		var apiErr *Error
 		if errors.As(err, &apiErr) {
-			serveError(w, apiErr)
+			serveError(ctx, w, apiErr)
 		} else {
 			ServeError(ctx, w, http.StatusInternalServerError, ErrorCodeInternalError, "unexpected error", err)
 		}
