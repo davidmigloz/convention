@@ -21,7 +21,7 @@ var (
 // sqlStateProvider is implemented by both lib/pq.Error and pgx-style PgError,
 // letting us classify SQLSTATEs without a direct driver dependency.
 // Classification (55P03 for lock contention, and 23505 for duplicate keys —
-// see isDuplicateInsertErr in mutate.go) requires the registered Postgres
+// see isDuplicateInsertErr in insert.go) requires the registered Postgres
 // driver's errors to implement this method; lib/pq gained SQLState() in
 // v1.10.5.
 type sqlStateProvider interface {

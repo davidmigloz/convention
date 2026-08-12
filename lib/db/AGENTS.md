@@ -12,7 +12,7 @@ This document provides implementation details for AI agents working on the `lib/
 - **[object.go](object.go)**: Object set initialization, table creation, type registration
 - **[where.go](where.go)**: Query builder implementation
 - **[select.go](select.go)**: Select operations (all variants)
-- **[insert.go](insert.go)**: Insert and upsert operations
+- **[insert.go](insert.go)**: Insert and upsert operations; classifies runtime-table primary-key violations as `ErrDuplicateID`
 - **[update.go](update.go)**: Update operations (normal and safe)
 - **[mutate.go](mutate.go)**: Optimistic-retry combinator over SafeUpdate
 - **[delete.go](delete.go)**: Delete operations
@@ -265,6 +265,37 @@ _, err = tx.Exec(`INSERT INTO "`+tos.table.HistoryTableName+`"
 
 This creates a snapshot of the current state in history.
 
+### Duplicate-Key Classification (Insert)
+
+`Insert`'s runtime-table `tx.Exec` error site classifies a primary-key
+violation and wraps it before returning:
+
+```go
+if isDuplicateInsertErr(err, engine) {
+    err = fmt.Errorf("%w: id=%s: %w", ErrDuplicateID, key.ID, err)
+}
+```
+
+- `Insert` resolves its DB handle via `dbByShardKeyWithEngine` (not
+  `dbByShardKey`) specifically so `engine` is available for classification.
+- `isDuplicateInsertErr` (insert.go) uses the same `hasSQLState` probe as the
+  55P03 lock-contention classifier: Postgres SQLSTATE `23505`, checked
+  unconditionally on both engines; SQLite (test-only) additionally falls
+  back, gated to `engine == EngineSqlite3`, to matching the driver's
+  `"UNIQUE constraint failed"` message substring (mattn/go-sqlite3 exposes
+  its error code as struct fields, not through an interface).
+- The deferred `errors.Join(err, tx.Rollback())` preserves `errors.Is`
+  reachability (`errors.Join` implements `Unwrap() []error`), and the
+  underlying driver error stays reachable too, via the wrap's second `%w`.
+- Only the runtime-table `Exec` is classified — the history table has no
+  PK/unique constraint (see the History Table Structure above), so `23505`
+  is structurally impossible there. `Upsert`/`UpsertWithMetadata` are
+  unaffected: `ON CONFLICT ("id") DO UPDATE` on the real PK is atomic and
+  cannot raise `23505` for that target.
+- `MutateOrInsert` propagates `ErrDuplicateID` from its own `Insert` call
+  into its retry budget rather than classifying anything itself — see
+  [May-create: MutateOrInsert](#may-create-mutateorinsert) below.
+
 ### Metadata Handling
 
 #### Insert
@@ -361,7 +392,7 @@ row := tx.QueryRow(`SELECT "object", "created_at", ...
     (classified via the shared `hasSQLState` probe over the unexported
     `sqlStateProvider` interface — works for both `lib/pq.Error` and
     `pgx`-style errors without a direct driver dep; the same probe backs
-    `MutateOrInsert`'s SQLSTATE 23505 duplicate-key classification. Requires
+    `Insert`'s SQLSTATE 23505 duplicate-key classification. Requires
     the registered Postgres driver's errors to implement `SQLState()` —
     `lib/pq` gained it in v1.10.5).
   - `ErrCASConflict` when the marshal-compare disagrees (or, defensively, when
@@ -539,29 +570,20 @@ semantics — there is no separate must-exist code path to drift out of sync.
   cross-shard duplicate. A mismatch aborts immediately with a plain error:
   no retry, no row written under either shard.
 - **Duplicate-key race**: if another caller inserts the same `id` between
-  this attempt's `SelectByID` and its own `Insert`, the resulting
-  duplicate-key error is absorbed into the same `mutateMaxAttempts` budget
-  and backoff as a CAS conflict, rather than surfaced as a raw driver error —
-  the next attempt's `SelectByID` normally finds the row the other caller
-  just created and converges through the ordinary update branch from there.
-  Classified by the unexported `isDuplicateInsertErr(err, engine)`: Postgres
-  SQLSTATE `23505` via the same `sqlStateProvider` probe
-  `classifyContentionErr` uses — checked unconditionally, on both engines;
-  SQLite (test-only) additionally falls back to matching the driver's
-  `"UNIQUE constraint failed"` message substring, since mattn/go-sqlite3
-  exposes its error code as struct fields rather than through an interface.
-  That substring match is gated to `engine == EngineSqlite3` so it can never
-  fire against a Postgres error, however the message happens to read — the
-  engine is looked up (registry only, no I/O) from the object's own
-  `ShardKey` at classification time. The surfaced error preserves the
-  underlying driver error via a second `%w` (`ErrDuplicateID: id=...: <driver
-  error>`), so both remain `errors.Is`/`As`-reachable. Duplicate-key
-  **exhaustion** specifically is not deterministically constructible in a
-  single-threaded test: after one collision, the next attempt's `SelectByID`
-  necessarily finds the racer's row and moves to the update branch, so
-  mutate_test.go's exhaustion test exercises the CAS path (a racer `Update`
-  on a pre-existing row) instead — same budget, same code path, reached
-  through this wrapper.
+  this attempt's `SelectByID` and its own `Insert`, `Insert` itself already
+  classifies the resulting primary-key violation as `ErrDuplicateID` (see
+  [Duplicate-Key Classification (Insert)](#duplicate-key-classification-insert)
+  above) — `mutateLoop` only checks `errors.Is(err, ErrDuplicateID)` and, if
+  so, absorbs it into the same `mutateMaxAttempts` budget and backoff as a
+  CAS conflict, rather than surfacing it as a raw driver error. The next
+  attempt's `SelectByID` normally finds the row the other caller just
+  created and converges through the ordinary update branch from there.
+  Duplicate-key **exhaustion** specifically is not deterministically
+  constructible in a single-threaded test: after one collision, the next
+  attempt's `SelectByID` necessarily finds the racer's row and moves to the
+  update branch, so mutate_test.go's exhaustion test exercises the CAS path
+  (a racer `Update` on a pre-existing row) instead — same budget, same code
+  path, reached through this wrapper.
 - **Delete race** (the mirror image): another caller deleting the row between
   this attempt's `SelectByID` and `SafeUpdate`'s guarded read surfaces as
   `ErrObjectNotFound` — absorbed into the same budget and backoff, retrying
@@ -598,9 +620,10 @@ semantics — there is no separate must-exist code path to drift out of sync.
 - **Return contract, no-op skip, freshness, and retry/backoff mechanics** are
   identical to `Mutate`'s (above).
 - **Sentinels**:
-  - `ErrDuplicateID` — the classification above, surfaced after the budget is
-    exhausted absorbing duplicate-key races (normally converged away before
-    that point).
+  - `ErrDuplicateID` — produced by `Insert` (see
+    [Duplicate-Key Classification (Insert)](#duplicate-key-classification-insert)
+    above), absorbed by `mutateLoop` into the retry budget and surfaced
+    after exhaustion (normally converged away before that point).
   - `ErrObjectVanished` — returned by the shared post-write re-read (used by
     both the update-success and insert-success paths) when `SelectByID`
     reports the row missing immediately after a successful write. The write

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
-	"strings"
 	"time"
 
 	convCtx "github.com/sofmon/convention/lib/ctx"
@@ -26,22 +25,13 @@ var (
 	mutateBackoffCap  = 160 * time.Millisecond
 )
 
-var (
-	// ErrDuplicateID is mutateLoop's classification of a duplicate-primary-key
-	// Insert failure on the insert branch (see isDuplicateInsertErr):
-	// absorbed into the retry budget while attempts remain, surfaced after
-	// exhaustion wrapped together with the id AND the underlying driver
-	// error (Go's multi-%w support keeps both errors.Is/As-reachable).
-	ErrDuplicateID = errors.New("convention/db: object with this id already exists")
-
-	// ErrObjectVanished is returned by mutateLoop's post-write re-read when
-	// SelectByID reports the row missing immediately after a successful
-	// SafeUpdate or Insert. The write committed, so this is deliberately not
-	// ErrObjectNotFound — that sentinel would invite a may-create caller to
-	// treat the row as never having existed and re-create it, when in fact
-	// it was deliberately removed out from under this call.
-	ErrObjectVanished = errors.New("convention/db: object vanished immediately after mutate wrote it")
-)
+// ErrObjectVanished is returned by mutateLoop's post-write re-read when
+// SelectByID reports the row missing immediately after a successful
+// SafeUpdate or Insert. The write committed, so this is deliberately not
+// ErrObjectNotFound — that sentinel would invite a may-create caller to
+// treat the row as never having existed and re-create it, when in fact
+// it was deliberately removed out from under this call.
+var ErrObjectVanished = errors.New("convention/db: object vanished immediately after mutate wrote it")
 
 // mutateRetryable reports whether err is a conflict mutateLoop should retry:
 // ErrCASConflict (lost the compare-and-swap) or ErrLockNotAvailable
@@ -68,28 +58,6 @@ func mutateBackoff(attempt int) time.Duration {
 	d := min(mutateBackoffBase<<(attempt-1), mutateBackoffCap)
 	half := d / 2
 	return half + rand.N(d-half)
-}
-
-// isDuplicateInsertErr reports whether err is a duplicate-primary-key
-// violation from an Insert that ran against engine. Postgres: SQLSTATE
-// 23505, via the same sqlStateProvider probe classifyContentionErr uses —
-// checked unconditionally, on both engines. SQLite (test-only):
-// mattn/go-sqlite3 exposes Code/ExtendedCode as struct fields, not through
-// an interface, so — short of importing the driver into production code —
-// classification falls back to matching the driver's "UNIQUE constraint
-// failed" message substring. That substring match is gated to
-// engine == EngineSqlite3: without the gate, a Postgres error whose message
-// happens to contain that text would misclassify; with it, the heuristic can
-// only ever affect the test-only engine, matching what this comment already
-// claims.
-func isDuplicateInsertErr(err error, engine Engine) bool {
-	if err == nil {
-		return false
-	}
-	if hasSQLState(err, "23505") {
-		return true
-	}
-	return engine == EngineSqlite3 && strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
 // mutateReRead re-reads the object mutateLoop just wrote (via SafeUpdate or
@@ -451,20 +419,15 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) mutateLoop(
 				obj, err = tos.mutateReRead(ctx, to)
 				return
 			}
-			insertErr := err
-
-			_, engine, engErr := dbByShardKeyWithEngine(tos.vault, tos.tenant, string(to.DBKey().ShardKey))
-			if engErr != nil {
-				err = engErr
-				return
-			}
-			if !isDuplicateInsertErr(insertErr, engine) {
-				err = insertErr
-				return // other Insert errors abort, no retry
-			}
 
 			// Duplicate-key insert race: see MutateOrInsert's doc comment.
-			lastErr = fmt.Errorf("%w: id=%s: %w", ErrDuplicateID, id, insertErr)
+			// Insert already classifies + wraps this as ErrDuplicateID
+			// (id and underlying driver error included), so there is
+			// nothing left to do here but absorb it into the retry budget.
+			if !errors.Is(err, ErrDuplicateID) {
+				return // other Insert errors abort, no retry
+			}
+			lastErr = err
 		}
 
 		if attempt == mutateMaxAttempts {
