@@ -2,6 +2,7 @@ package job
 
 import (
 	"fmt"
+	"testing"
 	"time"
 
 	convAuth "github.com/sofmon/convention/lib/auth"
@@ -51,6 +52,40 @@ func MemJobClosureForTest(tenant convAuth.Tenant, jid JobID) (present, hasClosur
 // InsertJobRowForTest writes a job DB row directly.
 func InsertJobRowForTest(ctx convCtx.Context, tenant convAuth.Tenant, jid JobID, nextRunAt time.Time, repeat time.Duration) error {
 	return jobsDB.Tenant(tenant).Insert(ctx, job{ID: jid, NextRunAt: nextRunAt, RepeatEvery: repeat})
+}
+
+// DeleteJobRowForTest raw-deletes the persisted runtime row for jid via
+// jobsDB, without touching the in-memory jobs map — simulates an out-of-band
+// peer's Unregister landing between our failed Insert and our retry.
+func DeleteJobRowForTest(ctx convCtx.Context, tenant convAuth.Tenant, jid JobID) error {
+	return jobsDB.Tenant(tenant).Delete(ctx, jid)
+}
+
+// NullJobRowObjectForTest sets the persisted runtime row's "object" column
+// to SQL NULL for jid via a raw write, bypassing jobsDB — same raw-write
+// pattern as lib/db's own SQL-NULL-object-row tests (mutate_test.go).
+// SelectByID then reads the row as absent while its primary key still
+// blocks a plain Insert, simulating a racer's row that is mid-teardown but
+// not yet fully removed.
+func NullJobRowObjectForTest(tenant convAuth.Tenant, jid JobID) error {
+	db, err := jobsDB.Tenant(tenant).RawDBForShardKey(jid)
+	if err != nil {
+		return err
+	}
+	table := jobsDB.Tenant(tenant).RuntimeTableName()
+	_, err = db.Exec(`UPDATE "`+table+`" SET "object"=NULL WHERE "id"=$1`, jid)
+	return err
+}
+
+// SetRegisterInsertRaceHookForTest installs a hook invoked immediately
+// before each Insert attempt Register makes, restoring the previous hook
+// (nil in production) via t.Cleanup — same precedent as SetLeaseForTest /
+// lib/db's StubMutateBackoffForTest.
+func SetRegisterInsertRaceHookForTest(t *testing.T, fn func()) {
+	t.Helper()
+	old := registerInsertRaceHookForTest
+	registerInsertRaceHookForTest = fn
+	t.Cleanup(func() { registerInsertRaceHookForTest = old })
 }
 
 // ReadJobRowNextRunForTest reads the persisted next_run_at for a job.
