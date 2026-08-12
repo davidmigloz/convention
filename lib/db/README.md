@@ -195,6 +195,10 @@ Live-object reads ignore runtime rows whose `object` column is SQL `NULL`.
 `SelectByID` and `SelectByIDWithMetadata` return `(nil, nil)` for those rows,
 the same as for a missing ID.
 
+`Select*` closes its cursor and releases the shard's connection on every
+error path, not only when a shard's rows are exhausted, and surfaces a
+mid-iteration driver error instead of silently truncating the results.
+
 ### Update Operations
 
 ```go
@@ -249,6 +253,10 @@ count, err := objSet.Tenant(tenant).ProcessWithMetadata(ctx, where,
     },
 )
 ```
+
+Same cursor/connection-release and driver-iteration-error contract as
+`Select*` (above); `count` reflects rows successfully processed before
+whichever error ended the loop.
 
 ## Locking
 

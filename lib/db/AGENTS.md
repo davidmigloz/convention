@@ -674,13 +674,33 @@ Stores shard index to unlock on the correct database instance; `owner` makes Ren
 for _, db := range dbs {
     var rows *sql.Rows
     rows, err = db.Query(...)
+    if err != nil {
+        return
+    }
+    defer rows.Close() // accumulates across shards — see Connection safety below
     // ... accumulate results
+    if err = rows.Err(); err != nil {
+        return
+    }
 }
 ```
 
 Results from all shards are combined into a single slice.
 
 **Important**: `LimitPerShard(n)` applies limit to EACH shard, so total results = `n * shard_count`.
+
+**Connection safety**: `rows.Close()` is deferred immediately after the
+`Query` error checks in all four `Select*` variants (and both `Process*`
+variants, below). Go defers are function-scoped, not loop-iteration-scoped,
+so they accumulate across every shard in the `for _, db := range dbs` loop
+and only run when the function itself returns — that is safe because (a) a
+happy-path shard's rows already auto-close the moment `Next()` reports
+exhaustion, releasing the connection immediately, and the later deferred
+`Close` on those same, already-closed rows is a documented no-op; (b) an
+early error return runs every accumulated defer, closing whichever single
+cursor is still open. `rows.Err()` is checked right after each `for
+rows.Next()` loop so a mid-iteration driver error surfaces as a real error
+instead of silently truncating the result set.
 
 #### Delete Operations
 [delete.go:23-47](delete.go#L23-L47)
@@ -828,6 +848,10 @@ Contract:
   `SelectAllWithMetadata` exclude runtime rows whose `object` column is SQL
   `NULL`; the same defensive check is applied after scanning
 - Good for small/medium result sets
+- Every shard's `*sql.Rows` is closed on every early-return error path, not
+  only at loop exhaustion, and a mid-iteration driver error is surfaced via
+  `rows.Err()` rather than silently truncating the results — see
+  [Connection safety](#select-operations) under Multi-Shard Operations
 
 **Process** ([process.go:11-70](process.go#L11-L70)):
 - Streams results via callback
@@ -836,6 +860,9 @@ Contract:
 - `Process` and `ProcessWithMetadata` apply the same SQL and post-scan
   live-object checks as `Select`
 - Good for large result sets or when transformation is needed
+- Same close-on-error and `rows.Err()` contract as `Select` (above);
+  `count` stands as the number of rows successfully processed before
+  whichever error — including a `rows.Err()` failure — ended the loop
 
 ```go
 count, err := objSet.Tenant(t).Process(ctx, where,
@@ -955,7 +982,16 @@ fragmented second connection the way it silently did before this fix; with
 the pool capped at one, it now blocks forever waiting on the exhausted pool
 instead. `Mutate`/`MutateOrInsert`'s `fn` is unaffected by this — it holds no
 connection while it runs (see the fn contract in
-[Optimistic retry (Mutate)](#optimistic-retry-mutate) above).
+[Optimistic retry (Mutate)](#optimistic-retry-mutate) above). This hazard is
+now confined to that narrow window — DB work genuinely concurrent with a
+still-open cursor, from inside a running callback or compute hook. It no
+longer extends past the erroring call itself: every collection read
+(`Select`, `SelectWithMetadata`, `SelectAll`, `SelectAllWithMetadata`,
+`Process`, `ProcessWithMetadata`) closes its `*sql.Rows` on every
+early-return error path (see [Process vs Select](#process-vs-select) and
+[Select Operations](#select-operations)), so a leaked cursor can no longer
+outlive the call and starve every later, unrelated query on the same shard
+the way it could before this fix.
 
 ## Extension Points
 
