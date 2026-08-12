@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 var placeholderPattern = regexp.MustCompile(`\$\d+`)
@@ -339,12 +340,61 @@ func (w *where) And() whereExpectingFirstStatement {
 	return w
 }
 
+// maxSearchTextBytes caps the text bound to plainto_tsquery. A tsquery holds at
+// most ~1MB of lexemes; past that PostgreSQL raises SQLSTATE 54000 ("value is
+// too big in tsquery") and fails the whole statement, which is the same class of
+// user-triggerable 500 this code exists to remove. Measured on PostgreSQL 16:
+// 339KB of distinct words is accepted, 1.06MB is not. 64KiB leaves a wide margin
+// and is far more than a search box can produce, while bounding how many GIN
+// keys one search fans out across every shard. An over-long single *word* is not
+// a concern - Postgres drops it with a notice rather than failing.
+const maxSearchTextBytes = 1 << 16
+
+// sanitizeSearchText makes arbitrary caller text safe to bind as a parameter.
+// It deliberately does not escape or interpret query syntax: plainto_tsquery
+// reads its argument as data, and the moment this package starts building
+// tsquery syntax again the metacharacter crash is back. It removes only what
+// Postgres cannot accept at all - a NUL byte is rejected outright ("null
+// character not permitted") and an invalid UTF-8 sequence fails when the
+// parameter is decoded - and trims a length the server would refuse.
+func sanitizeSearchText(text string) string {
+
+	// Replace rather than drop, so a NUL cannot fuse two words into one
+	text = strings.ReplaceAll(text, "\x00", " ")
+
+	// A Go string is arbitrary bytes; anything not valid UTF-8 fails on decode
+	text = strings.ToValidUTF8(text, " ")
+
+	// Cut on a rune boundary so the string stays valid UTF-8
+	if len(text) > maxSearchTextBytes {
+		cut := maxSearchTextBytes
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut--
+		}
+		text = text[:cut]
+	}
+
+	return text
+}
+
+// Search matches the object's generated "text_search" column against the
+// caller's text, which is bound as data and never compiled into a query.
+// plainto_tsquery hands its argument to the text-search parser and never reads
+// it as tsquery syntax, so an apostrophe, a dangling operator or an unbalanced
+// parenthesis typed into a search box can no longer reach the server as broken
+// tsquery and fail the statement with SQLSTATE 42601. Do not reintroduce a
+// Go-side tsquery builder: an escaper is only as exhaustive as the grammar it
+// was written against, while not parsing is correct by construction.
+//
+// Words are AND-ed after stemming and stop-word removal, matching what the
+// previous to_tsquery path produced for ordinary input. tsquery operators are
+// no longer honoured - see the Text Search section of AGENTS.md.
 func (w *where) Search(text string) whereExpectingLogicalOperator {
 	if w.err != nil {
 		return w
 	}
-	w.query.WriteString(`"text_search" @@ to_tsquery('english', $` + strconv.Itoa(len(w.params)+1) + `)`)
-	w.params = append(w.params, toTSQuery(text))
+	w.query.WriteString(`"text_search" @@ plainto_tsquery('english', $` + strconv.Itoa(len(w.params)+1) + `)`)
+	w.params = append(w.params, sanitizeSearchText(text))
 	return w
 }
 
@@ -447,20 +497,4 @@ func (w *where) Offset(offset int) whereClosed {
 	w.appendTail(`OFFSET ` + strconv.Itoa(offset))
 
 	return w
-}
-
-var whitespacePattern = regexp.MustCompile(`\s+`)
-
-func toTSQuery(input string) string {
-
-	// Step 1: Replace multiple spaces with a single space
-	input = whitespacePattern.ReplaceAllString(input, " ")
-
-	// Step 2: Trim leading and trailing spaces (if any)
-	input = strings.TrimSpace(input)
-
-	// Step 3: Replace spaces with the '&' operator
-	input = strings.ReplaceAll(input, " ", " & ")
-
-	return input
 }

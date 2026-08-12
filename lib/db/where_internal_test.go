@@ -6,8 +6,10 @@ import (
 	"reflect"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func Test_where_preservesLatchedError(t *testing.T) {
@@ -200,8 +202,8 @@ func Test_where_statements(t *testing.T) {
 		{
 			"search",
 			func() whereReady { return Where().Search("hello world") },
-			`"text_search" @@ to_tsquery('english', $1)`,
-			[]any{"hello & world"},
+			`"text_search" @@ plainto_tsquery('english', $1)`,
+			[]any{"hello world"},
 		},
 		{
 			"created_by_or_updated_by",
@@ -272,26 +274,188 @@ func Test_where_separatesPredicateFromOrderLimitAndOffset(t *testing.T) {
 	}
 }
 
-func Test_toTSQuery(t *testing.T) {
+// Test_sanitizeSearchText pins that search text is passed through as data. Most
+// cases below are identities, and that is the assertion: the predecessor of this
+// function built tsquery syntax in Go, so every metacharacter here was a
+// PostgreSQL 42601 syntax error that failed the whole statement. The non-identity
+// cases are the hardening — bytes Postgres cannot hold in a text parameter, and
+// the operand-length limit that raises the same error class from inside
+// plainto_tsquery.
+func Test_sanitizeSearchText(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
 		want  string
 	}{
+		// Ordinary text is untouched: no collapsing, no trimming, no joining.
 		{"single_word", "hello", "hello"},
-		{"two_words", "hello world", "hello & world"},
-		{"collapses_whitespace", "hello \t\n  world", "hello & world"},
-		{"trims_surrounding_whitespace", "  a b  ", "a & b"},
+		{"two_words", "hello world", "hello world"},
+		{"keeps_whitespace_runs", "hello \t\n  world", "hello \t\n  world"},
+		{"keeps_surrounding_whitespace", "  a b  ", "  a b  "},
+		{"unicode_letters", "日本語", "日本語"},
+
+		// The reported crashes: each of these is now data, not syntax.
+		{"apostrophe", "O'Brien", "O'Brien"},
+		{"leading_apostrophe", "'tis", "'tis"},
+		{"single_quote_term", "'", "'"},
+		{"trailing_ampersand", "hello &", "hello &"},
+		{"unbalanced_close_paren", "hello )", "hello )"},
+		{"unbalanced_open_paren", "( hello", "( hello"},
+		{"lone_backslash", `\`, `\`},
+		{"trailing_backslash", `C:\path\`, `C:\path\`},
+		{"colon_after_word", "invoice: 1234", "invoice: 1234"},
+
+		// tsquery operators are no longer honoured, but they are not errors.
+		{"negation_operator", "!spam", "!spam"},
+		{"prefix_operator", "wor:*", "wor:*"},
+		{"phrase_operator", "a <-> b", "a <-> b"},
+		{"or_operator", "cat|dog", "cat|dog"},
+		{"spaced_or_operator", "a | b", "a | b"},
+		{"weight_label", "fat:C", "fat:C"},
+
+		// Degenerate input.
+		{"pure_punctuation", "!@#$%^&*()", "!@#$%^&*()"},
+		{"mixed_valid_and_punctuation", "hello &&& world", "hello &&& world"},
 		{"empty", "", ""},
+		{"whitespace_only", "   ", "   "},
+
+		// Bytes Postgres cannot hold in a text parameter.
+		{"nul_becomes_space", "a\x00b", "a b"},
+		{"invalid_utf8_becomes_space", "caf\xe9", "caf "},
+
+		// The length cap that keeps "value is too big in tsquery" out of reach.
+		// "日" is three bytes and 65536 is not a multiple of three, so the cut
+		// lands mid-rune and must step back to 65535 — 21845 whole runes.
+		{"at_byte_cap_unchanged", strings.Repeat("a", maxSearchTextBytes), strings.Repeat("a", maxSearchTextBytes)},
+		{"over_byte_cap_truncated", strings.Repeat("a", maxSearchTextBytes+953), strings.Repeat("a", maxSearchTextBytes)},
+		{"over_byte_cap_cuts_on_rune_boundary", strings.Repeat("日", 30000), strings.Repeat("日", 21845)},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := toTSQuery(tt.input); got != tt.want {
-				t.Fatalf("toTSQuery(%q) = %q, want %q", tt.input, got, tt.want)
+			got := sanitizeSearchText(tt.input)
+			if got != tt.want {
+				t.Fatalf("sanitizeSearchText(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+			if len(got) > maxSearchTextBytes {
+				t.Fatalf("sanitizeSearchText(%q) returned %d bytes, want at most %d", tt.input, len(got), maxSearchTextBytes)
+			}
+			if !utf8.ValidString(got) {
+				t.Fatalf("sanitizeSearchText(%q) = %q, which is not valid UTF-8", tt.input, got)
+			}
+			if strings.ContainsRune(got, 0) {
+				t.Fatalf("sanitizeSearchText(%q) = %q, which contains a NUL byte", tt.input, got)
 			}
 		})
 	}
+}
+
+// Test_where_search_bindsTextAsData pins the contract the old to_tsquery path
+// violated: the statement is fixed and the caller's text reaches the parameter
+// unaltered. Nothing about the SQL may depend on the input.
+func Test_where_search_bindsTextAsData(t *testing.T) {
+	const wantQuery = `"text_search" @@ plainto_tsquery('english', $1)`
+
+	inputs := []struct {
+		name  string
+		input string
+	}{
+		{"two_words", "hello world"},
+		{"apostrophe", "O'Brien"},
+		{"leading_apostrophe", "'tis"},
+		{"single_quote_term", "'"},
+		{"trailing_ampersand", "hello &"},
+		{"unbalanced_close_paren", "hello )"},
+		{"unbalanced_open_paren", "( hello"},
+		{"negation_operator", "!spam"},
+		{"prefix_operator", "wor:*"},
+		{"phrase_operator", "a <-> b"},
+		{"lone_backslash", `\`},
+		{"trailing_backslash", `C:\path\`},
+		{"pure_punctuation", "!@#$%^&*()"},
+		{"mixed_valid_and_punctuation", "hello &&& world"},
+		{"empty", ""},
+		{"whitespace_only", "   "},
+	}
+
+	for _, tt := range inputs {
+		t.Run(tt.name, func(t *testing.T) {
+			query, params, err := Where().Search(tt.input).statement()
+			if err != nil {
+				t.Fatalf("Search(%q) returned error: %v", tt.input, err)
+			}
+			if query != wantQuery {
+				t.Fatalf("Search(%q) query mismatch:\n got %q\nwant %q", tt.input, query, wantQuery)
+			}
+			if !reflect.DeepEqual(params, []any{tt.input}) {
+				t.Fatalf("Search(%q) params mismatch:\n got %#v\nwant %#v", tt.input, params, []any{tt.input})
+			}
+			assertPlaceholdersConsistent(t, query, params)
+		})
+	}
+}
+
+// Test_where_search_doesNotBuildTSQuery guards the two ways this fix can be
+// undone: routing back through to_tsquery, which parses its argument as tsquery
+// syntax, or interpolating the caller's text into the statement instead of
+// binding it. Note that strings.Contains(query, "to_tsquery") is true for
+// plainto_tsquery — the "@@ " prefix is what makes the check meaningful.
+func Test_where_search_doesNotBuildTSQuery(t *testing.T) {
+	const probe = `x') OR '1'='1`
+
+	query, params, err := Where().Search(probe).statement()
+	if err != nil {
+		t.Fatalf("Search(%q) returned error: %v", probe, err)
+	}
+	if strings.Contains(query, "@@ to_tsquery(") {
+		t.Fatalf("Search must not call to_tsquery, which parses tsquery syntax: %q", query)
+	}
+	if !strings.Contains(query, "@@ plainto_tsquery('english', $1)") {
+		t.Fatalf("Search must bind through plainto_tsquery: %q", query)
+	}
+	if strings.Contains(query, probe) {
+		t.Fatalf("search text leaked into the statement: %q", query)
+	}
+	if !reflect.DeepEqual(params, []any{probe}) {
+		t.Fatalf("search text must be bound verbatim: %#v", params)
+	}
+}
+
+// FuzzSearchBindsTextAsData is the only mechanism that will find the next edge
+// case: for any input the statement must not vary and the bound value must
+// always be something Postgres can accept as a text parameter.
+func FuzzSearchBindsTextAsData(f *testing.F) {
+	for _, seed := range []string{"O'Brien", "hello &", "bar )", `C:\path\`, "'", "!spam", "wor:*", "", "   ", "a\x00b"} {
+		f.Add(seed)
+	}
+
+	const wantQuery = `"text_search" @@ plainto_tsquery('english', $1)`
+
+	f.Fuzz(func(t *testing.T, text string) {
+		query, params, err := Where().Search(text).statement()
+		if err != nil {
+			t.Fatalf("Search(%q) returned error: %v", text, err)
+		}
+		if query != wantQuery {
+			t.Fatalf("statement depends on input %q: %q", text, query)
+		}
+		if len(params) != 1 {
+			t.Fatalf("Search(%q) bound %d params, want 1", text, len(params))
+		}
+		got, ok := params[0].(string)
+		if !ok {
+			t.Fatalf("Search(%q) bound %T, want string", text, params[0])
+		}
+		if len(got) > maxSearchTextBytes {
+			t.Fatalf("Search(%q) bound %d bytes, want at most %d", text, len(got), maxSearchTextBytes)
+		}
+		if !utf8.ValidString(got) {
+			t.Fatalf("Search(%q) bound %q, which is not valid UTF-8", text, got)
+		}
+		if strings.ContainsRune(got, 0) {
+			t.Fatalf("Search(%q) bound %q, which contains a NUL byte", text, got)
+		}
+	})
 }
 
 var testPlaceholderPattern = regexp.MustCompile(`\$(\d+)`)
@@ -349,7 +513,7 @@ func Test_where_expression_placeholder_renumbering(t *testing.T) {
 					Key("requested_products.private_investments").Equals().Value(true),
 			).
 				And().Key("management.managing_entity").Equals().Value("some-entity"),
-			expectSQL: `1=1 AND "text_search" @@ to_tsquery('english', $1) AND ` +
+			expectSQL: `1=1 AND "text_search" @@ plainto_tsquery('english', $1) AND ` +
 				`("object"->'grants'->'allow_private_investments'=$2 OR "object"->'requested_products'->'private_investments'=$3)` +
 				` AND "object"->'management'->'managing_entity'=$4`,
 			expectCount: 4,

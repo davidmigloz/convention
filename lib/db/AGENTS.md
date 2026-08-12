@@ -478,41 +478,77 @@ When shard keys provided:
 Without shard keys: Returns all databases for tenant.
 
 ### Text Search
-[where.go:321-328](where.go#L321-L328)
+[where.go:380-399](where.go#L380-L399)
 
 ```go
 func (w *where) Search(text string) whereExpectingLogicalOperator {
     if w.err != nil {
         return w
     }
-    w.query.WriteString(`"text_search" @@ to_tsquery('english', $` + strconv.Itoa(len(w.params)+1) + `)`)
-    w.params = append(w.params, toTSQuery(text))
+    w.query.WriteString(`"text_search" @@ plainto_tsquery('english', $` + strconv.Itoa(len(w.params)+1) + `)`)
+    w.params = append(w.params, sanitizeSearchText(text))
     return w
 }
 ```
 
-**Text search preprocessing** ([where.go:431-444](where.go#L431-L444)):
-```go
-var whitespacePattern = regexp.MustCompile(`\s+`)
+**The caller's text is bound as data. There is no query-string building.**
+`Search` used to normalise whitespace, join the terms with `&` and hand the
+result to `to_tsquery`. `to_tsquery` parses its argument as tsquery *syntax*, so
+a dangling operator (`hello &`), an unbalanced parenthesis (`hello )`), a leading
+apostrophe (`'tis`) or a trailing backslash (`C:\path\`) raised SQLSTATE 42601
+and failed the whole statement — an HTTP 500 from a search box.
+`plainto_tsquery` runs the same parser and dictionaries but treats its argument
+as plain text and never reads a tsquery operator, so **no input can produce a
+tsquery syntax error**.
 
-func toTSQuery(input string) string {
-    // Normalize whitespace
-    input = whitespacePattern.ReplaceAllString(input, " ")
-    input = strings.TrimSpace(input)
-    // Convert spaces to & operator
-    input = strings.ReplaceAll(input, " ", " & ")
-    return input
-}
-```
+Do not reintroduce a Go-side tsquery builder. An escaper is only ever as
+exhaustive as the grammar it was written against; not parsing is correct by
+construction. (Contrast `escapeJSONKeySegment`, which escapes because a key
+segment is interpolated into SQL text and has no bound-parameter alternative.)
 
-Converts `"hello world"` to `"hello & world"` for AND search.
+**Input hardening** ([where.go:343-378](where.go#L343-L378)): `sanitizeSearchText`
+replaces NUL bytes and invalid UTF-8 with a space and caps the text at
+`maxSearchTextBytes = 64KiB`, cutting on a rune boundary. Both guards close
+remaining user-triggerable 500s that `plainto_tsquery` does *not* cover:
 
-**Generated column** ([object.go:162-163](object.go#L162-L163)):
+- a NUL byte cannot exist in a PostgreSQL text value at all (`54000 null
+  character not permitted`), and invalid UTF-8 fails when the parameter is
+  decoded;
+- a tsquery holds at most ~1 MB of lexemes, past which PostgreSQL raises
+  `54000 value is too big in tsquery`. Measured on PostgreSQL 16: 339 KB of
+  distinct words is accepted, 1.06 MB is not. 64 KiB leaves a wide margin and
+  also bounds GIN key fan-out per shard. Text over the cap is silently truncated.
+
+An over-long single *word* needs no guard — PostgreSQL drops it with a notice
+("word is too long to be indexed") rather than failing, in `to_tsquery`,
+`plainto_tsquery` and `to_tsvector` alike.
+
+Semantics:
+
+- Words are AND-ed after stemming and stop-word removal: `"hello world"` →
+  `'hello' & 'world'`. For ordinary whitespace-separated input this is identical
+  to what the old `to_tsquery` path produced.
+- Empty, whitespace-only, stop-word-only and pure-punctuation input all yield the
+  empty tsquery, which matches **no rows**. `Search("")` is a zero-row match, not
+  a no-op. Pure punctuation used to error.
+- **tsquery operators are ignored, not obeyed.** `:*` (prefix), `!` (negation),
+  `|` (or), `<->` (phrase) and parentheses reached `to_tsquery` intact whenever
+  the input contained no spaces, and worked. They no longer do anything. In
+  particular `Search("!x")` now matches rows containing `x` rather than rows
+  lacking it, and `Search("sm:*")` no longer prefix-matches. A caller needing
+  those must get an explicit API — do not route query syntax through user-facing
+  free text.
+- `plainto_tsquery(regconfig, text)` is IMMUTABLE, like `to_tsquery`, so the GIN
+  index is used exactly as before.
+
+**Generated column** ([object.go:197-200](object.go#L197-L200)):
 ```sql
 "text_search" tsvector GENERATED ALWAYS AS (jsonb_to_tsvector('english', "object", '["all"]')) STORED
 ```
 
-Automatically indexes all text in the JSONB object.
+Automatically indexes all text in the JSONB object; the GIN index is created at
+[object.go:232-236](object.go#L232-L236). The `'english'` configuration is
+hard-coded here and in `Search`; the two must stay in sync.
 
 ### Field Indexes (`WithIndexes`)
 
@@ -675,6 +711,20 @@ When modifying this package, consider:
 4. **No migrations**: Schema changes require manual ALTER TABLE statements
 5. **No query plan analysis**: No automatic index recommendations
 6. **Limit is per-shard**: `LimitPerShard(n)` returns up to `n * shard_count` results
+7. **Text search is hardened on the query side only**: `plainto_tsquery` plus
+   `sanitizeSearchText` make `Search()` total for any caller text, but the
+   *write* side is untouched — `jsonb_to_tsvector` in the generated column
+   raises `54000 string is too long for tsvector` on INSERT/UPDATE for any
+   object whose indexable text exceeds ~1 MB in total (verified on PostgreSQL
+   16). That makes the object unstorable and needs no adversarial input. A
+   single over-long token is fine; it is the total that matters. Separately,
+   calling `Search()` on an object set that was not configured with
+   `WithTextSearch()` fails with SQLSTATE 42703; the `where` builder has no
+   handle on the object set and structurally cannot detect it.
+8. **`WithTextSearch()` is PostgreSQL-only**: the generated `tsvector` column
+   uses `GENERATED ALWAYS AS ... STORED` and cannot be created on the SQLite
+   engine, so text search is not exercised by this repo's test suite. Changes
+   to `Search()` must be verified against a real PostgreSQL manually.
 
 ## Performance Considerations
 

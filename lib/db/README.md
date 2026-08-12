@@ -140,6 +140,8 @@ db.Where().
 - `LessThan()`, `LessThanOrEquals()`
 - `In()`, `NotIn()`
 - `Like()`
+- `Search()` — full-text match; plain text only, PostgreSQL text-search
+  operators are not interpreted (see [Text Search](#text-search))
 
 `IsNull()` and `IsNotNull()` test the SQL nullity of the JSON path expression.
 An absent key is SQL `NULL`; an explicitly stored JSON `null` is not. A nil Go
@@ -390,6 +392,20 @@ results, err := docs.Tenant(tenant).Select(ctx,
     db.Where().Search("keyword1 keyword2"),
 )
 ```
+
+`Search` takes **plain text, not a query language**. The text is bound as a
+parameter to PostgreSQL's `plainto_tsquery('english', …)`: it is tokenised,
+stemmed, stripped of stop words, and the remaining words must all match (AND).
+
+- Any input is accepted. Apostrophes, operators and unbalanced parentheses
+  (`O'Brien`, `foo &`, `bar )`) are treated as text rather than parsed, so they
+  cannot fail the query.
+- Search operators are **not** supported. `:*`, `!`, `|`, `<->` and parentheses
+  are ordinary punctuation and are dropped.
+- Empty, whitespace-only or stop-word-only text matches **no rows**.
+- Text longer than 64 KiB is truncated.
+- Requires `WithTextSearch()`, and therefore PostgreSQL — the generated
+  `tsvector` column is not available on the SQLite engine.
 
 ### Compute Functions
 
