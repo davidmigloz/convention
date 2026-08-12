@@ -14,6 +14,7 @@ This document provides implementation details for AI agents working on the `lib/
 - **[select.go](select.go)**: Select operations (all variants)
 - **[insert.go](insert.go)**: Insert and upsert operations
 - **[update.go](update.go)**: Update operations (normal and safe)
+- **[mutate.go](mutate.go)**: Optimistic-retry combinator over SafeUpdate
 - **[delete.go](delete.go)**: Delete operations
 - **[lock.go](lock.go)**: Locking mechanisms
 - **[metadata.go](metadata.go)**: Metadata types and operations
@@ -317,6 +318,17 @@ for _, compute := range tos.compute {
 
 ### Locking Mechanisms
 
+#### Choosing a concurrency primitive
+
+| You need | Use |
+|---|---|
+| Last-writer-wins overwrite, single writer assumed | `Update` |
+| Reject-if-changed, caller handles conflict (HTTP 409) | `SafeUpdate` |
+| Read-modify-write, row must exist | `Mutate` |
+| Read-modify-write, row may not exist yet | `MutateOrInsert` |
+| Short exclusive critical section, never stolen | sticky `Lock` / `SelectByIDAndLock` |
+| Long-running holder surviving crashes, writes only while owned | `Lock(WithLease)` + `Renew` + `UpdateGuarded` |
+
 #### Optimistic Locking (SafeUpdate)
 
 ```go
@@ -346,8 +358,12 @@ row := tx.QueryRow(`SELECT "object", "created_at", ...
     `NULL`. This is classified before the caller-provided `from` value enters
     the comparison pipeline.
   - `ErrLockNotAvailable` when `FOR UPDATE NOWAIT` raises SQLSTATE 55P03
-    (classified via the unexported `sqlStateProvider` interface — works for
-    both `lib/pq.Error` and `pgx`-style errors without a direct driver dep).
+    (classified via the shared `hasSQLState` probe over the unexported
+    `sqlStateProvider` interface — works for both `lib/pq.Error` and
+    `pgx`-style errors without a direct driver dep; the same probe backs
+    `MutateOrInsert`'s SQLSTATE 23505 duplicate-key classification. Requires
+    the registered Postgres driver's errors to implement `SQLState()` —
+    `lib/pq` gained it in v1.10.5).
   - `ErrCASConflict` when the marshal-compare disagrees (or, defensively, when
     a SQLite-mode UPDATE affects zero rows).
 
@@ -357,13 +373,240 @@ row := tx.QueryRow(`SELECT "object", "created_at", ...
   writers between SELECT and UPDATE; contention surfaces as
   `ErrLockNotAvailable`.
 - **SQLite (in-memory test only):** lock clause elided. The comparator
-  still catches stale-`from` callers, but two truly concurrent writers can
-  race past it with no conflict raised. Acceptable because SQLite usage is
-  single-process unit testing.
+  still catches stale-`from` callers, but the real reason no conflict is
+  ever *missed* here is this package's single-connection pool for in-memory
+  SQLite (see the Connection pooling paragraph under Testing Patterns,
+  below) — two SQLite writers can never truly race at the driver level, so a
+  stale `from` is always caught, by the comparator, as `ErrCASConflict`. See
+  `SafeUpdate`'s doc comment (update.go) for the full story.
 
 Callers must not mutate `from`'s business state between load and call. The
 comparator is metadata-insensitive (both sides are compute-normalized), so
 embedded audit stamps need not match — only business fields do.
+
+#### Optimistic retry (Mutate)
+
+```go
+func (tos TenantObjectSet[objT, idT, shardKeyT]) Mutate(
+    ctx convCtx.Context,
+    id idT,
+    fn func(cur objT) (objT, error),
+    shardKeys ...shardKeyT,
+) (obj objT, err error)
+```
+
+`Mutate` wraps the SelectByID → fn → SafeUpdate cycle every `SafeUpdate`
+caller would otherwise hand-roll, retrying on the two conflict sentinels, for
+a row that must already exist. For a row that may not exist yet, see
+[MutateOrInsert](#may-create-mutateorinsert) below — both share one internal
+loop, so their retry/backoff/cancellation mechanics cannot drift apart.
+
+| Error | Retried? |
+|---|---|
+| `ErrCASConflict` | yes |
+| `ErrLockNotAvailable` | yes (incl. wrapped) |
+| `ErrObjectNotFound` | no — returned immediately (`MutateOrInsert` instead absorbs a mid-attempt delete race — see below) |
+| fn's own error | no — returned immediately, fn is never retried for its own errors |
+
+`fn` must not be `nil`: `mutateLoop` checks this before any I/O and returns a
+plain error if it is. Unlike `fn`, a `nil` `seed` on `MutateOrInsert` is
+blessed (see below) — the two are not symmetric.
+
+**Return contract**: on success, `obj` is the value a subsequent `SelectByID`
+would observe — including any `WithCompute` stamps — never `fn`'s return
+value echoed back. `SafeUpdate` takes the object by value and stamps compute
+fields internally, so none of that propagates back out of it; `Mutate`
+re-reads the row after a successful write to give an honest answer. The
+re-read is also the only faithful option on Postgres, where the JSONB column
+keeps nanosecond timestamps but the `created_at`/`updated_at` columns are
+microsecond-truncated — echoing `fn`'s return value would drift from what a
+real subsequent read reports. On any error, `obj` is the zero value.
+
+An error return does not always mean nothing persisted, though: if the write
+itself committed but the post-write re-read failed (`ErrObjectVanished`, or a
+transient read error), the mutation IS durably applied even though `Mutate`
+returns an error. Callers needing exactly-once effects must make `fn`
+idempotent — don't treat `err != nil` as proof nothing happened.
+
+**Freshness caveat**: the returned `obj` may already reflect a concurrent
+writer's later mutation — it is "what a subsequent `SelectByID` would
+observe", not "your write echoed back verbatim". A caller returning it
+directly in an HTTP response must not assume it is exactly what it just
+wrote. A no-op-skipped return (below) is even less fresh: it is the row as of
+Mutate's own read, not re-verified at return.
+
+**No-op skip (default behaviour)**: if `fn` returns an object byte-identical
+(canonical JSON marshal) to the row `Mutate` just read, `Mutate` performs no
+write at all — no `SafeUpdate` call, no re-read, no further attempts — and
+returns that row as of that read. `updated_at` is left untouched. Want a bump
+even when nothing meaningfully changed? Change a field before returning from
+`fn` — touch it to bump it. Because the comparison is a plain marshal-byte
+compare, an `fn` that touches a `WithCompute`-owned field (e.g. re-stamps a
+timestamp a compute hook already owns) always looks changed to it — forcing
+an unnecessary write whose hooks then overwrite that same field again on the
+way back out. Don't touch compute-owned fields from `fn`.
+
+**Wrong shard-key hint** (must-exist `Mutate`): `shardKeys` is a
+query-routing hint for `SelectByID` only. A wrong hint makes an existing row
+look absent, so `Mutate` returns `ErrObjectNotFound` immediately — same
+failure mode as a genuinely missing `id`. Contrast `MutateOrInsert`, where a
+wrong hint fails safely instead (see below).
+
+- **Attempts**: `mutateMaxAttempts = 5`.
+- **Backoff**: exponential from `mutateBackoffBase = 10ms`, doubling each
+  attempt, then jittered uniformly over `[d/2, d)` (`math/rand/v2`). At the
+  current `mutateMaxAttempts = 5` this produces 4 waits (attempts 1-4; none
+  after the final attempt) of roughly `[5,10) + [10,20) + [20,40) + [40,80)`
+  ms, jittered. `mutateBackoffCap = 160ms` bounds the doubling but is
+  headroom only — it never actually engages at the current attempt count;
+  it exists in case `mutateMaxAttempts` is ever raised. Wall-clock
+  (`time.NewTimer`), not `ctx.Now()`-driven — this is about real contention,
+  not simulated time. `mutateBackoffBase`/`mutateBackoffCap` are `var`, not
+  `const`, purely so `export_test.go`'s `StubMutateBackoffForTest` can
+  shrink them for fast sleeping tests.
+- **Deep-clone guarantee**: before every fn call, the just-loaded row is
+  cloned via `cloneViaJSON` (marshal→unmarshal, same technique as
+  `SafeUpdate`'s own `from`-clone in update.go — both now share this one
+  helper) to become the CAS baseline. A fn that mutates its `cur` argument's
+  slices/maps in place is safe — it cannot corrupt the baseline the way a
+  shallow copy would, and the no-op skip returns that pristine clone, never
+  an alias of `cur`. The clone drops unexported fields, same as
+  `SafeUpdate` (encoding/json's rule); a `MarshalJSON` failure on the clone
+  aborts immediately — fn never runs, no retry.
+- **fn contract**: may run up to 5 times; must be pure or otherwise strictly
+  retry-safe — no irreversible or externally visible side effects inside.
+  Those belong after `Mutate` returns success: persist first, then
+  side-effect. That fn runs with no open transaction is an implementation
+  detail (useful for test machinery — see mutate_test.go's racer sub-tests),
+  not an invitation to do DB work inside fn.
+- **Cancellation**: checked at the top of every loop iteration and during the
+  backoff wait (house `time.NewTimer` + `select` on `ctx.Done()` pattern,
+  mirroring `lib/job`'s scheduler loop). A cancellation
+  observed during backoff returns `errors.Join(ctx.Err(), lastErr)`, so
+  callers can `errors.Is` for both `context.Canceled` and the conflict
+  sentinel that triggered the wait.
+- **Exhaustion**: after `mutateMaxAttempts` failed attempts, returns the last
+  conflict error wrapped with an attempt count — still `errors.Is`-matchable
+  against whichever conflict recurred last: `ErrCASConflict`,
+  `ErrLockNotAvailable`, `ErrDuplicateID` (`MutateOrInsert`'s insert branch),
+  or `ErrObjectNotFound` (`MutateOrInsert`'s delete-race absorption).
+- **SQLite caveat**: the test-only engine never raises the Postgres NOWAIT
+  SQLSTATE. That's not reachable via genuine cross-connection contention in
+  this harness either — see the dialect-split note above (single-connection
+  pool serializes SQLite writers; a stale `from` is still caught by the
+  comparator, as `ErrCASConflict`).
+- No functional options — the variadic slot is already `shardKeys`;
+  additive later if a caller need appears.
+
+#### May-create: MutateOrInsert
+
+```go
+func (tos TenantObjectSet[objT, idT, shardKeyT]) MutateOrInsert(
+    ctx convCtx.Context,
+    id idT,
+    seed func() (objT, error),
+    fn func(cur objT) (objT, error),
+    shardKeys ...shardKeyT,
+) (obj objT, err error)
+```
+
+`MutateOrInsert` is `Mutate` for a row that may not exist yet. Both share one
+internal retry loop selected by whether `seed` is `nil`: `Mutate(...)` is
+exactly `MutateOrInsert` with a `nil` seed, which degrades it to must-exist
+semantics — there is no separate must-exist code path to drift out of sync.
+
+- **Branch selection**: each attempt starts with `SelectByID`. Row found →
+  the ordinary `Mutate` update branch (`fn` runs on `cur`, no-op skip
+  applies, `SafeUpdate`). Row missing → `seed()` builds the initial object,
+  `fn` runs on it, and the result is `Insert`ed — the no-op skip does not
+  apply here (there is nothing yet-persisted to compare a freshly-seeded row
+  against).
+- **`fn` runs on BOTH branches** — put merge/validation logic in one place
+  there. `seed`'s only job is producing the initial base for a
+  not-yet-existing row; it never runs on the update branch. Both must be
+  pure/retry-safe, same contract as `Mutate`'s `fn`. `seed` may run once per
+  insert-branch attempt.
+- **ID guard**: on the insert branch, `fn`'s returned object's `DBKey().ID`
+  must equal `id` — unlike `SafeUpdate`, plain `Insert` has no ID guard of
+  its own, so `MutateOrInsert` checks it. A mismatch aborts immediately with
+  a plain (non-sentinel) error: no retry, no row written under either ID.
+- **ShardKey guard**: on the insert branch, `fn`'s returned object's
+  `DBKey().ShardKey` must equal `seed`'s — mirroring `SafeUpdate`'s own
+  from/to shard-mismatch rejection, which this combinator's update branch
+  already inherits but the insert branch previously lacked. Without it, an
+  `fn` that changes the shard-key field after `seed` would make `Insert`
+  land on a shard other than the one `SelectByID` checked — a true
+  cross-shard duplicate. A mismatch aborts immediately with a plain error:
+  no retry, no row written under either shard.
+- **Duplicate-key race**: if another caller inserts the same `id` between
+  this attempt's `SelectByID` and its own `Insert`, the resulting
+  duplicate-key error is absorbed into the same `mutateMaxAttempts` budget
+  and backoff as a CAS conflict, rather than surfaced as a raw driver error —
+  the next attempt's `SelectByID` normally finds the row the other caller
+  just created and converges through the ordinary update branch from there.
+  Classified by the unexported `isDuplicateInsertErr(err, engine)`: Postgres
+  SQLSTATE `23505` via the same `sqlStateProvider` probe
+  `classifyContentionErr` uses — checked unconditionally, on both engines;
+  SQLite (test-only) additionally falls back to matching the driver's
+  `"UNIQUE constraint failed"` message substring, since mattn/go-sqlite3
+  exposes its error code as struct fields rather than through an interface.
+  That substring match is gated to `engine == EngineSqlite3` so it can never
+  fire against a Postgres error, however the message happens to read — the
+  engine is looked up (registry only, no I/O) from the object's own
+  `ShardKey` at classification time. The surfaced error preserves the
+  underlying driver error via a second `%w` (`ErrDuplicateID: id=...: <driver
+  error>`), so both remain `errors.Is`/`As`-reachable. Duplicate-key
+  **exhaustion** specifically is not deterministically constructible in a
+  single-threaded test: after one collision, the next attempt's `SelectByID`
+  necessarily finds the racer's row and moves to the update branch, so
+  mutate_test.go's exhaustion test exercises the CAS path (a racer `Update`
+  on a pre-existing row) instead — same budget, same code path, reached
+  through this wrapper.
+- **Delete race** (the mirror image): another caller deleting the row between
+  this attempt's `SelectByID` and `SafeUpdate`'s guarded read surfaces as
+  `ErrObjectNotFound` — absorbed into the same budget and backoff, retrying
+  into the insert branch. Our write never committed, so this is linearizable
+  as "their delete, then our insert" — ordinary upsert semantics, unrelated
+  to `ErrObjectVanished` (which protects the post-commit re-read, where the
+  write DID commit). Only `MutateOrInsert` absorbs it; must-exist `Mutate`
+  still aborts with `ErrObjectNotFound` in the same window, as its contract
+  requires. This absorption assumes the race is transient — a permanently
+  misfiled row (`ShardKey` routing to a shard other than the one it actually
+  lives on, unsupported-resharding territory) recurs every attempt and
+  simply exhausts instead of converging.
+- **Wrong shard-key hint**: `shardKeys` is a query-routing hint for
+  `SelectByID` only, never validated against the object's real `ShardKey`. A
+  wrong hint fails safely — it does not heal, and it does not corrupt: every
+  attempt misses the existing row on `SelectByID` (routed by the hint), takes
+  the insert branch, and `Insert` (which routes by the object's own
+  `ShardKey`, not the hint) hits the row's real shard and duplicate-key-fails
+  there — exhausting the budget with `ErrDuplicateID`, never creating a
+  duplicate row. The one caller-bug this specific check cannot defend
+  against — `seed` itself building the object with a different `ShardKey`
+  than the existing row's — is now caught by the ShardKey guard above
+  instead, which aborts before `Insert` is ever attempted.
+- **SQL-NULL-object row** (deliberately unresolved, not a bug): a runtime row
+  whose `object` column is SQL `NULL` (see the live-object guard elsewhere in
+  this document) reads as absent to `SelectByID`, so every attempt takes the
+  insert branch and collides with the still-present primary key — exhausting
+  with `ErrDuplicateID` rather than reviving the row, even though a caller
+  reading the `id` sees it as absent. Intentional: silently resurrecting such
+  a row via a may-create combinator would contradict the deliberate-delete
+  rationale this package defends elsewhere (upstream issue #15 will forbid
+  the state outright). `Upsert`, not `MutateOrInsert`, is the primitive that
+  can overwrite a SQL-NULL-object row.
+- **Return contract, no-op skip, freshness, and retry/backoff mechanics** are
+  identical to `Mutate`'s (above).
+- **Sentinels**:
+  - `ErrDuplicateID` — the classification above, surfaced after the budget is
+    exhausted absorbing duplicate-key races (normally converged away before
+    that point).
+  - `ErrObjectVanished` — returned by the shared post-write re-read (used by
+    both the update-success and insert-success paths) when `SelectByID`
+    reports the row missing immediately after a successful write. The write
+    committed, so this is deliberately not `ErrObjectNotFound`, which would
+    invite a may-create caller to treat the row as never having existed and
+    re-create it.
 
 #### Pessimistic Locking — two modes
 
@@ -657,6 +900,27 @@ Tests use in-memory SQLite for fast execution:
 
 Two connections simulate sharding.
 
+**Connection pooling**: `connection.Open()`'s in-memory sqlite branch calls
+`db.SetMaxOpenConns(1)`. mattn/go-sqlite3's `:memory:` is otherwise a trap —
+each pooled connection opens an independent in-memory database, so a pool
+size >1 silently fragments reads/writes across separate DBs (a write on one
+connection is invisible to a query that lands on another). This is set at
+`Open()` time, not once in `TestMain`, so it survives `Test_open_and_close`,
+which closes and reopens every `*sql.DB` — a bug that
+would otherwise revert the pool to unlimited and make the callback-racer
+tests in mutate_test.go (`Mutate`'s and `MutateOrInsert`'s conflict/race
+sub-tests) order-dependent, since they rely on an out-of-band write during
+`fn` landing on the same connection the combinator itself is using.
+
+The flip side of the cap: DB work issued from *inside* a held-connection
+window — a `Process`/`ProcessWithMetadata` callback, or a compute hook
+running during `Select` iteration, on the same shard — no longer lands on a
+fragmented second connection the way it silently did before this fix; with
+the pool capped at one, it now blocks forever waiting on the exhausted pool
+instead. `Mutate`/`MutateOrInsert`'s `fn` is unaffected by this — it holds no
+connection while it runs (see the fn contract in
+[Optimistic retry (Mutate)](#optimistic-retry-mutate) above).
+
 ## Extension Points
 
 When modifying this package, consider:
@@ -675,6 +939,8 @@ When modifying this package, consider:
 4. **No migrations**: Schema changes require manual ALTER TABLE statements
 5. **No query plan analysis**: No automatic index recommendations
 6. **Limit is per-shard**: `LimitPerShard(n)` returns up to `n * shard_count` results
+7. **Mutate/MutateOrInsert backoff is wall-clock**: not `ctx.Now()`-driven, and bounded at 5 attempts
+8. **No SQL-level CAS token**: `SafeUpdate`'s guard is the marshal-compare comparator plus the Postgres row lock, not a version column that every writer advances (tracked as a separate version-column design issue)
 
 ## Performance Considerations
 
