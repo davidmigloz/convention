@@ -45,7 +45,22 @@ func (conn connection) Open() (*sql.DB, error) {
 		)
 	case EngineSqlite3:
 		if conn.InMemory {
-			return sql.Open("sqlite3", ":memory:")
+			db, err := sql.Open("sqlite3", ":memory:")
+			if err != nil {
+				return nil, err
+			}
+			// mattn/go-sqlite3 trap: each pooled connection to ":memory:" opens an
+			// otherwise-independent in-memory database — database/sql hands callers
+			// whichever connection is idle, so a pool >1 silently fragments
+			// reads/writes across separate DBs (a write on one connection is
+			// invisible to a query that lands on another). Cap to a single
+			// connection so every caller shares the same instance. Set here, at
+			// Open() time, rather than once in TestMain: that survives
+			// Test_open_and_close, which closes and reopens every *sql.DB and
+			// would otherwise revert the pool to unlimited and make later
+			// Mutate callback-racer tests order-dependent.
+			db.SetMaxOpenConns(1)
+			return db, nil
 		} else {
 			// TODO: implement file-based sqlite databases
 			return nil, errors.New("sqlite engine does not support file-based databases")

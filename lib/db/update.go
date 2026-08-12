@@ -20,19 +20,48 @@ var (
 
 // sqlStateProvider is implemented by both lib/pq.Error and pgx-style PgError,
 // letting us classify SQLSTATEs without a direct driver dependency.
+// Classification (55P03 for lock contention, and 23505 for duplicate keys —
+// see isDuplicateInsertErr in mutate.go) requires the registered Postgres
+// driver's errors to implement this method; lib/pq gained SQLState() in
+// v1.10.5.
 type sqlStateProvider interface {
 	SQLState() string
 }
 
-func classifyContentionErr(err error) (mapped error, ok bool) {
+// hasSQLState reports whether err (or something it wraps, via errors.As)
+// implements sqlStateProvider and reports the given SQLSTATE. Shared probe
+// behind classifyContentionErr (55P03) and mutate.go's isDuplicateInsertErr
+// (23505).
+func hasSQLState(err error, state string) bool {
 	if err == nil {
-		return nil, false
+		return false
 	}
-	var pgErr sqlStateProvider
-	if errors.As(err, &pgErr) && pgErr.SQLState() == "55P03" {
+	var sqlErr sqlStateProvider
+	return errors.As(err, &sqlErr) && sqlErr.SQLState() == state
+}
+
+func classifyContentionErr(err error) (mapped error, ok bool) {
+	if hasSQLState(err, "55P03") {
 		return ErrLockNotAvailable, true
 	}
 	return nil, false
+}
+
+// cloneViaJSON returns a deep copy of v via marshal→unmarshal, plus the
+// intermediate marshaled form (raw) for callers that also need it as a
+// canonical-JSON comparison baseline — mutateLoop's CAS baseline clone does;
+// callers that don't (SafeUpdate's from-clone below) discard it. The
+// round-trip is what makes the clone safe against a caller mutating v's
+// slices/maps in place after cloning: they no longer share backing storage.
+// encoding/json drops unexported fields on the round-trip — same semantics
+// both call sites already relied on before this was extracted.
+func cloneViaJSON[T any](v T) (clone T, raw []byte, err error) {
+	raw, err = json.Marshal(v)
+	if err != nil {
+		return
+	}
+	err = json.Unmarshal(raw, &clone)
+	return
 }
 
 func (tos TenantObjectSet[objT, idT, shardKeyT]) Update(ctx convCtx.Context, obj objT) (err error) {
@@ -110,12 +139,25 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) Update(ctx convCtx.Context, obj
 // current row still matches the caller's `from` snapshot. Returns
 // ErrObjectNotFound if the row is missing, ErrLockNotAvailable on contended
 // NOWAIT acquisition (Postgres only), and ErrCASConflict on a stale `from`.
+// On conflict, the caller reloads and retries — Mutate does exactly that
+// loop (reload → fn → SafeUpdate, with backoff) for the common case of a
+// read-modify-write that should converge under contention; reach for it
+// before hand-rolling the retry here.
 //
 // True CAS is Postgres-only — the `FOR UPDATE NOWAIT` row lock is required to
 // block concurrent writers between the SELECT and the UPDATE. SQLite mode
-// elides the lock; the comparator still catches stale-`from` callers but two
-// truly concurrent SQLite writers can race past it. Use SQLite for tests,
-// Postgres for production.
+// elides that lock, but this package's in-memory SQLite pool is capped at a
+// single connection (SetMaxOpenConns(1), see AGENTS.md's Connection pooling
+// section), so two SQLite writers can never truly race at the driver level
+// in the first place — every write serializes through that one connection.
+// A writer whose `from` snapshot went stale while queued behind another
+// writer's commit is still caught, just by the comparator rather than a
+// lock, and surfaces as the ordinary ErrCASConflict. The real Postgres/
+// SQLite difference is narrower than "SQLite can lose an update": Postgres
+// additionally blocks a second writer from even starting its comparison
+// while the first holds the row lock; SQLite lets both comparisons run and
+// relies entirely on the comparator to reject whichever one goes stale. Use
+// SQLite for tests, Postgres for production.
 //
 // Callers must not mutate `from`'s business state between load and call.
 // Both the current row and `from` are normalized through the same
@@ -219,12 +261,7 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) SafeUpdate(ctx convCtx.Context,
 		return
 	}
 
-	var fromCmp objT
-	fromRaw, err := json.Marshal(from)
-	if err != nil {
-		return
-	}
-	err = json.Unmarshal(fromRaw, &fromCmp)
+	fromCmp, _, err := cloneViaJSON(from)
 	if err != nil {
 		return
 	}
@@ -271,6 +308,14 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) SafeUpdate(ctx convCtx.Context,
 		return
 	}
 
+	// On Postgres this is unreachable: FOR UPDATE NOWAIT above already holds
+	// the row lock, so no concurrent writer can have changed it since the
+	// comparator's SELECT, and the UPDATE by "id" always affects exactly one
+	// row. On SQLite (lock clause elided, writers serialized by this
+	// package's single-connection pool — see the dialect-split note above)
+	// it is a defensive backstop against future refactors rather than a
+	// live race: no other write can be concurrently in flight to race this
+	// one out from under it.
 	if count == 0 {
 		err = fmt.Errorf("%w: id=%s", ErrCASConflict, fromKey.ID)
 		return

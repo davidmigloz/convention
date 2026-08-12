@@ -209,6 +209,17 @@ err := objSet.Tenant(tenant).SafeUpdate(ctx, from, to)
 if errors.Is(err, db.ErrCASConflict) {
     // 409 — caller's snapshot is stale; reload and retry.
 }
+
+// Mutate: does that reload-and-retry loop for you. Loads the row, hands it
+// to fn, and retries (up to 5 attempts, with jittered backoff) on
+// ErrCASConflict / ErrLockNotAvailable. Returns the persisted object (what a
+// subsequent SelectByID would observe). A fn that returns the row unchanged
+// performs no write — see the no-op note below.
+obj, err = objSet.Tenant(tenant).Mutate(ctx, id, func(cur MyObject) (MyObject, error) {
+    cur.Counter++ // safe to mutate cur in place — Mutate clones the CAS
+                  // baseline before calling fn
+    return cur, nil
+})
 ```
 
 ### Delete Operations
@@ -268,15 +279,94 @@ case errors.Is(err, db.ErrCASConflict):
 | `ErrLockNotAvailable` | Another transaction holds `FOR UPDATE NOWAIT` on the row      | 409          |
 | `ErrCASConflict`      | Row mutated between caller's load and `SafeUpdate`            | 409          |
 
-`SafeUpdate` is a true CAS only on Postgres. On SQLite the row lock is elided;
-the comparator guards against stale-`from` callers but two truly concurrent
-writers can race past it. Use SQLite for tests, Postgres for production.
+`Mutate` surfaces `ErrCASConflict` / `ErrLockNotAvailable` only after
+exhausting its retries — see below.
+
+`SafeUpdate` is a true CAS only on Postgres. On SQLite the row lock is
+elided, but this package's single-connection pool for in-memory SQLite
+serializes writers anyway, so a stale `from` is still caught — by the
+comparator, as `ErrCASConflict` — rather than racing past unnoticed. Use
+SQLite for tests, Postgres for production.
 
 The comparator normalizes both the current row and your `from` snapshot
 through the object set's compute hooks before comparing, so it compares
 business state and ignores embedded metadata (audit stamps). You may load
 `from` via any path (`SelectByID`, `Process`, hand-built) — just don't mutate
 its business fields between load and call.
+
+#### Retrying: Mutate
+
+Hand-rolling the reload/retry loop around `SafeUpdate` is common enough that
+`Mutate` does it for you. It returns the persisted object — what a
+subsequent `SelectByID` would observe, including any compute-hook stamps —
+not `fn`'s return value echoed back:
+
+```go
+obj, err := objSet.Tenant(tenant).Mutate(ctx, id, func(cur MyObject) (MyObject, error) {
+    cur.Field = "new value" // safe to mutate cur in place — Mutate clones
+                             // the CAS baseline before calling fn
+    return cur, nil
+})
+```
+
+**No-op skip (default)**: if `fn` returns the row byte-identical to what
+`Mutate` just read, nothing is written — no `updated_at` bump, no history
+row — and the returned object is that just-read row, not re-verified against
+the database at return (a written return, by contrast, is a fresh re-read).
+Want a bump anyway (e.g. to record a touch)? Change a field before returning
+from `fn`.
+
+| You need | Use |
+|---|---|
+| Caller handles the conflict itself (HTTP 409) | `SafeUpdate` |
+| Read-modify-write, row must exist | `Mutate` |
+| Read-modify-write, row may not exist yet | `MutateOrInsert` |
+
+`fn` may run up to 5 times and must be pure/retry-safe — no side effects
+inside it; do those after `Mutate` returns successfully. See
+[AGENTS.md](AGENTS.md#optimistic-retry-mutate) for the full retry/backoff
+contract.
+
+#### May-create: MutateOrInsert
+
+For a row that may not exist yet, `MutateOrInsert` adds a `seed` that builds
+the initial object when `id` is missing; `fn` still runs on both branches
+(merge/validation in one place), while `seed`'s only job is the not-yet-existing
+row's starting point:
+
+```go
+obj, err := objSet.Tenant(tenant).MutateOrInsert(ctx, id,
+    func() (MyObject, error) {
+        return MyObject{ID: id, Counter: 0}, nil // only used if id is missing
+    },
+    func(cur MyObject) (MyObject, error) {
+        cur.Counter++
+        return cur, nil
+    },
+)
+```
+
+A row that already exists is handled exactly like `Mutate` (`seed` is never
+called). A duplicate-key insert race — another caller creating the same `id`
+concurrently — is absorbed into the same retry budget as a CAS conflict, so
+it normally converges rather than erroring; so is the mirror-image delete
+race (a racer deleting the row mid-attempt reconverges through the insert
+branch — only `Mutate`, whose row must exist, aborts there). See
+[AGENTS.md](AGENTS.md#may-create-mutateorinsert) for the ID guard, the
+wrong-shard-hint failure mode, and the duplicate-key classification detail.
+
+**Error handling (`Mutate` / `MutateOrInsert`):**
+
+| Error | Cause | Typical HTTP |
+|---|---|---|
+| `ErrDuplicateID` | `MutateOrInsert` exhausted its retries absorbing duplicate-key insert races (rare — these normally converge before exhaustion) | 409 |
+| `ErrObjectVanished` | The write succeeded, but the row was gone on the immediate post-write re-read | no clean analogue — the write committed; this is the caller's decision to make, not ours to prescribe |
+
+`Mutate` and `MutateOrInsert` surface `ErrCASConflict` / `ErrLockNotAvailable`
+only after exhausting their retries — see above. The exhaustion error is
+`errors.Is`-matchable against whichever of the four conflict sentinels
+recurred last: `ErrCASConflict`, `ErrLockNotAvailable`, `ErrDuplicateID`, or
+(the delete-race path) `ErrObjectNotFound`.
 
 ### Pessimistic Locking
 
@@ -309,6 +399,33 @@ distinguishes that race from an object that was already absent, which returns
 also fails, Convention logs the failure with the object ID, returns both
 errors, and keeps the lock non-nil so the caller can retry `Unlock`. Losing the
 acquisition race never removes the other caller's lock.
+
+#### Lease locks (long-running holders)
+
+The default lock above is a sticky mutex: it is never stolen, so a holder
+that crashes without unlocking blocks everyone else forever. For a holder
+that may legitimately crash mid-work (e.g. a scheduled job), acquire with
+`WithLease` instead — a lock whose heartbeat goes stale is stolen rather than
+blocking indefinitely:
+
+```go
+lock, err := objSet.Tenant(tenant).Lock(ctx, obj, "processing", db.WithLease(90*time.Second))
+if err != nil || lock == nil {
+    return // a live owner already holds it
+}
+defer lock.Unlock() // owner-safe; returns ErrLeaseLost if this lock was stolen
+
+// heartbeat well within the lease, e.g. from the run loop:
+// if err := lock.Renew(ctx); errors.Is(err, db.ErrLeaseLost) { /* stop working */ }
+
+obj.Field = "updated"
+err = lock.UpdateGuarded(ctx, obj) // persists only while still owning the lease
+```
+
+`Renew` and `UpdateGuarded` both return `ErrLeaseLost` once another caller has
+stolen the lease. See [AGENTS.md](AGENTS.md#pessimistic-locking--two-modes)
+for the full semantics (`Stolen()`, `PreviousOwner()`, and `UpdateGuarded`'s
+no-read-then-write-window guarantee).
 
 ## Raw SQL Access
 
