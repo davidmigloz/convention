@@ -4,7 +4,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"hash/crc32"
 	"testing"
+
+	"github.com/google/uuid"
 
 	convAuth "github.com/sofmon/convention/lib/auth"
 	convCtx "github.com/sofmon/convention/lib/ctx"
@@ -43,7 +46,7 @@ func Test_RowsClosedOnErrorPaths(t *testing.T) {
 
 	t.Run("SelectAll", func(t *testing.T) {
 		ctx := convCtx.New(convAuth.Claims{User: convAuth.User(t.Name())})
-		db, _, _ := newCorruptedFixturePair(t, ctx, "select-all")
+		db := newCorruptedFixturePair(t, ctx, "select-all")
 
 		_, err := complexDB.Tenant("test").SelectAll(ctx)
 		assertDecodeErrorSurfaced(t, err)
@@ -52,7 +55,7 @@ func Test_RowsClosedOnErrorPaths(t *testing.T) {
 
 	t.Run("SelectAllWithMetadata", func(t *testing.T) {
 		ctx := convCtx.New(convAuth.Claims{User: convAuth.User(t.Name())})
-		db, _, _ := newCorruptedFixturePair(t, ctx, "select-all-md")
+		db := newCorruptedFixturePair(t, ctx, "select-all-md")
 
 		_, err := complexDB.Tenant("test").SelectAllWithMetadata(ctx)
 		assertDecodeErrorSurfaced(t, err)
@@ -61,7 +64,7 @@ func Test_RowsClosedOnErrorPaths(t *testing.T) {
 
 	t.Run("Select", func(t *testing.T) {
 		ctx := convCtx.New(convAuth.Claims{User: convAuth.User(t.Name())})
-		db, _, _ := newCorruptedFixturePair(t, ctx, "select")
+		db := newCorruptedFixturePair(t, ctx, "select")
 
 		// Scoped by CreatedBy (a real SQL column), not a JSON-field
 		// predicate: the where builder's "object"->'key' extraction
@@ -79,7 +82,7 @@ func Test_RowsClosedOnErrorPaths(t *testing.T) {
 
 	t.Run("SelectWithMetadata", func(t *testing.T) {
 		ctx := convCtx.New(convAuth.Claims{User: convAuth.User(t.Name())})
-		db, _, _ := newCorruptedFixturePair(t, ctx, "select-md")
+		db := newCorruptedFixturePair(t, ctx, "select-md")
 
 		// See Select above for why this scopes by CreatedBy rather than a
 		// JSON-field predicate.
@@ -121,6 +124,29 @@ func Test_RowsClosedOnErrorPaths(t *testing.T) {
 		}
 		assertConnectionReleased(t, db)
 	})
+
+	// The five sub-tests above all run against the "complex" vault, which the
+	// test config gives a single shard — so they only ever exercise one
+	// iteration of the `for _, db := range dbs` loop, and never the
+	// defer-accumulation behaviour that loop's justification comment
+	// (select.go's SelectAll) is entirely about. This one uses the two-shard
+	// "messages" vault so the accumulation is what is under test: the first
+	// shard is iterated to exhaustion (auto-closed, connection released
+	// before the second shard is even queried) and the second shard's cursor
+	// is still open when the decode error returns, leaving it to the
+	// accumulated defer.
+	t.Run("SelectAll_across_shards", func(t *testing.T) {
+		ctx := convCtx.New(convAuth.Claims{User: convAuth.User(t.Name())})
+		dbs := newCorruptedMessagesFixture(t, ctx)
+
+		_, err := messagesDB.Tenant("test").SelectAll(ctx)
+		assertDecodeErrorSurfaced(t, err)
+		for i, db := range dbs {
+			if s := db.Stats(); s.InUse != 0 {
+				t.Fatalf("shard %d leaked the connection: Stats().InUse = %d, want 0", i, s.InUse)
+			}
+		}
+	})
 }
 
 // newCorruptedFixturePair inserts two ComplexObject rows on the "complex"
@@ -136,12 +162,12 @@ func Test_RowsClosedOnErrorPaths(t *testing.T) {
 // SelectAllWithMetadata, which have no where clause to scope away from a
 // row left behind by an earlier test — an un-deleted corrupt row here would
 // poison every later where-less test on this vault.
-func newCorruptedFixturePair(t *testing.T, ctx convCtx.Context, suffix string) (shardDB *sql.DB, id1, id2 ComplexID) {
+func newCorruptedFixturePair(t *testing.T, ctx convCtx.Context, suffix string) (shardDB *sql.DB) {
 	t.Helper()
 
 	f1 := newComplexFixture(t, ctx, suffix+"-1")
 	f2 := newComplexFixture(t, ctx, suffix+"-2")
-	id1, id2 = f1.ComplexID, f2.ComplexID
+	id1, id2 := f1.ComplexID, f2.ComplexID
 
 	shardDB, err := complexDB.Tenant("test").RawDBForShardKey(id2)
 	if err != nil {
@@ -157,7 +183,75 @@ func newCorruptedFixturePair(t *testing.T, ctx convCtx.Context, suffix string) (
 		cleanupComplexFixtures(t, ctx, shardDB, id1, id2)
 	})
 
-	return shardDB, id1, id2
+	return shardDB
+}
+
+// newCorruptedMessagesFixture inserts one Message on every shard of the
+// two-shard "messages" vault and corrupts the row on the *last* shard, so a
+// where-less read exhausts at least one whole shard before it fails. It
+// returns every shard handle in the same order SelectAll walks them
+// (RawDBs preserves config order — see raw_access_test.go).
+//
+// Cleanup mirrors cleanupComplexFixtures: it skips the delete while any
+// shard still shows a leaked connection, because on a pre-fix red run that
+// shard's single-connection pool is pinned and Delete would block forever.
+func newCorruptedMessagesFixture(t *testing.T, ctx convCtx.Context) (dbs []*sql.DB) {
+	t.Helper()
+
+	tos := messagesDB.Tenant("test")
+
+	dbs, err := tos.RawDBs()
+	if err != nil {
+		t.Fatalf("RawDBs failed: %v", err)
+	}
+	if len(dbs) < 2 {
+		t.Fatalf("expected the messages vault to have at least 2 shards, got %d", len(dbs))
+	}
+
+	ids := make([]MessageID, len(dbs))
+	for i := range dbs {
+		ids[i] = messageIDForShard(t, i, len(dbs))
+		msg := Message{MessageID: ids[i], Content: "rows-close-shard-" + string(ids[i])}
+		if err := tos.Insert(ctx, msg); err != nil {
+			t.Fatalf("Insert on shard %d failed: %v", i, err)
+		}
+	}
+
+	last := len(dbs) - 1
+	table := tos.RuntimeTableName()
+	if _, err := dbs[last].Exec(`UPDATE "`+table+`" SET "object"=$1 WHERE "id"=$2`, "not-json", ids[last]); err != nil {
+		t.Fatalf("corrupt fixture row on shard %d: %v", last, err)
+	}
+
+	t.Cleanup(func() {
+		for i, db := range dbs {
+			if s := db.Stats(); s.InUse > 0 {
+				t.Logf("skipping fixture cleanup: shard %d still shows Stats().InUse=%d (expected on a pre-fix red run)", i, s.InUse)
+				return
+			}
+		}
+		for _, id := range ids {
+			if err := tos.Delete(ctx, id); err != nil {
+				t.Errorf("cleanup fixture %s: %v", id, err)
+			}
+		}
+	})
+
+	return dbs
+}
+
+// messageIDForShard returns a MessageID that provably routes to the given
+// shard index, using the same crc32.ChecksumIEEE(key)%count formula the
+// package routes with (database.go's indexByShardKey) rather than assuming
+// any particular distribution.
+func messageIDForShard(t *testing.T, shard, shardCount int) MessageID {
+	t.Helper()
+	for {
+		candidate := MessageID(uuid.NewString())
+		if int(crc32.ChecksumIEEE([]byte(candidate))%uint32(shardCount)) == shard {
+			return candidate
+		}
+	}
 }
 
 // newProcessErrorFixture inserts a single ComplexObject row and returns its

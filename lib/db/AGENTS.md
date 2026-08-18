@@ -668,7 +668,7 @@ Stores shard index to unlock on the correct database instance; `owner` makes Ren
 ### Multi-Shard Operations
 
 #### Select Operations
-[select.go:238](select.go#L238)
+[select.go:252](select.go#L252)
 
 ```go
 for _, db := range dbs {
@@ -841,7 +841,7 @@ Contract:
 
 ### Process vs Select
 
-**Select** ([select.go:220-281](select.go#L220-L281)):
+**Select** ([select.go:252-320](select.go#L252-L320)):
 - Loads all results into memory
 - Returns slice
 - `Select`, `SelectWithMetadata`, `SelectAll`, and
@@ -853,7 +853,7 @@ Contract:
   `rows.Err()` rather than silently truncating the results — see
   [Connection safety](#select-operations) under Multi-Shard Operations
 
-**Process** ([process.go:11-70](process.go#L11-L70)):
+**Process** ([process.go:11-79](process.go#L11-L79)):
 - Streams results via callback
 - No intermediate storage
 - Returns count of processed items
