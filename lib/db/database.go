@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"reflect"
 	"sync"
 
 	convAuth "github.com/sofmon/convention/lib/auth"
@@ -141,6 +142,13 @@ func Close() (err error) {
 	dbs = nil
 	dbsOnce = sync.Once{} // Reset so Open() can be called again
 	dbsErr = nil
+
+	// The tables these names refer to went away with the connections above
+	// (for in-memory SQLite the whole database did). Keeping the registry
+	// would make the next prepare() short-circuit on a hit and never issue
+	// its CREATE TABLE IF NOT EXISTS.
+	typeToTable = map[Vault]map[reflect.Type]dbTable{}
+
 	return
 }
 

@@ -115,7 +115,11 @@ func TestRegisterRetriesOnceWhenRacerRowVanishes(t *testing.T) {
 func TestRegisterGivesUpAfterOneRetry(t *testing.T) {
 	ctx := newCtx()
 	const jid convJob.JobID = "register-insert-race-gives-up"
-	defer func() { _ = convJob.Unregister(ctx, testTenant, jid) }()
+	// Unregister would no-op here: it returns early when there is no
+	// in-memory entry, which is exactly the state this test ends in, so the
+	// hook's PK-blocking row would survive into every later test in the
+	// package. Delete the row directly instead.
+	defer func() { _ = convJob.DeleteJobRowForTest(ctx, testTenant, jid) }()
 
 	startAt := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second)
 	const repeat = time.Hour
