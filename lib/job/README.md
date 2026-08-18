@@ -128,7 +128,7 @@ The package uses `convDB` for persistence. Database connections must be configur
 ## Error Handling
 
 - `Initialise` returns an error if the scheduler is already running
-- `Register` returns an error if the scheduler is not initialised or if a job with the same ID already exists for the tenant
+- `Register` returns an error if the scheduler is not initialised, if persisting a changed schedule (interval re-anchor, or the new/converged row) fails, or if a concurrent-insert race collides twice in a row (see AGENTS.md's Register section). A job with the same ID that already exists is **not** an error: `Register` is idempotent — it re-attaches the closure and refreshes the schedule, converging with a concurrently-racing `Register` on another replica instead of failing
 - `Unregister` returns an error if the tenant or job does not exist
 - `Cancel` returns an error if the scheduler is not running
 - Background errors (DB sync failures, lock errors, job execution errors) are logged via `ctx.Logger()` and do not stop the scheduler

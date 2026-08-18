@@ -164,8 +164,14 @@ case with `Key("field").Equals().Value(nil)`.
 ### Insert Operations
 
 ```go
-// Insert: Fails if object already exists
+// Insert: fails if object already exists. A runtime-table primary-key
+// violation is classified and wrapped as ErrDuplicateID (id and the
+// underlying driver error stay errors.Is/As-reachable):
+//   fmt.Errorf("%w: id=%s: %w", db.ErrDuplicateID, key.ID, err)
 err := objSet.Tenant(tenant).Insert(ctx, obj)
+if errors.Is(err, db.ErrDuplicateID) {
+    // 409 — an object with this id already exists.
+}
 
 // Upsert: Insert or update if exists
 err := objSet.Tenant(tenant).Upsert(ctx, obj)
@@ -367,7 +373,7 @@ wrong-shard-hint failure mode, and the duplicate-key classification detail.
 
 | Error | Cause | Typical HTTP |
 |---|---|---|
-| `ErrDuplicateID` | `MutateOrInsert` exhausted its retries absorbing duplicate-key insert races (rare — these normally converge before exhaustion) | 409 |
+| `ErrDuplicateID` | A primary-key violation on `Insert`; also surfaced by `MutateOrInsert` once its retry budget is exhausted absorbing insert races (rare — these normally converge first) | 409 |
 | `ErrObjectVanished` | The write succeeded, but the row was gone on the immediate post-write re-read | no clean analogue — the write committed; this is the caller's decision to make, not ours to prescribe |
 
 `Mutate` and `MutateOrInsert` surface `ErrCASConflict` / `ErrLockNotAvailable`

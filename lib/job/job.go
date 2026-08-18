@@ -44,6 +44,19 @@ var (
 	wakeUp chan struct{}
 )
 
+// registerInsertRaceHookForTest, when non-nil, is invoked immediately before
+// each Insert attempt Register makes (both the initial attempt and the
+// bounded one-time retry below) — a test seam for deterministically
+// injecting a peer replica's concurrent Insert/Delete right at the point a
+// real race would land. Nil in production; see export_test.go's
+// SetRegisterInsertRaceHookForTest.
+//
+// The hook runs with mut held (Register takes it for its whole body), so a
+// hook that calls back into Register/Unregister self-deadlocks. Write
+// directly against jobsDB instead — that is what the ...ForTest row helpers
+// in export_test.go are for.
+var registerInsertRaceHookForTest func()
+
 // Lease tuning for the per-execution job lock. jobRenewInterval must stay well
 // below jobLease so a couple of transient renew failures don't expire a live lease;
 // jobLease bounds how long a crashed holder's lock blocks others before it is
@@ -143,20 +156,73 @@ func Register(ctx convCtx.Context, tenant convAuth.Tenant, jid JobID, startAt ti
 			RepeatEvery: repeatEvery,
 			f:           fn,
 		}
-		if err = jobsDB.Tenant(tenant).Insert(ctx, nj); err != nil {
+		if registerInsertRaceHookForTest != nil {
+			registerInsertRaceHookForTest()
+		}
+		err = jobsDB.Tenant(tenant).Insert(ctx, nj)
+		if err == nil {
+			jobs[tenant][jid] = nj
+			wake()
 			return
 		}
-		jobs[tenant][jid] = nj
-		wake()
+		if !errors.Is(err, convDB.ErrDuplicateID) {
+			return // other Insert errors abort, no retry
+		}
+
+		// Concurrent-insert race: a peer replica inserted the same id
+		// between our SelectByID above and this Insert. Re-read to see
+		// what it left behind and converge on it, the same way a second
+		// Register after restart would.
+		var racedJob *job
+		racedJob, err = jobsDB.Tenant(tenant).SelectByID(ctx, jid)
+		if err != nil {
+			return
+		}
+		if racedJob != nil {
+			return applyPersistedJob(ctx, tenant, jid, startAt, repeatEvery, fn, racedJob)
+		}
+
+		// The racer's row is no longer visible (concurrent Unregister
+		// churn raced our re-read): retry the Insert exactly once.
+		// Deliberately two bounded sequential blocks, NOT a loop and NOT
+		// mutateLoop-style backoff — this is a one-time startup race, not
+		// a hot write path.
+		if registerInsertRaceHookForTest != nil {
+			registerInsertRaceHookForTest()
+		}
+		err = jobsDB.Tenant(tenant).Insert(ctx, nj)
+		if err == nil {
+			jobs[tenant][jid] = nj
+			wake()
+			return
+		}
+		if errors.Is(err, convDB.ErrDuplicateID) {
+			// %v, not %w: deliberately NOT ErrDuplicateID-matchable (a
+			// caller must not mistake persistent churn for the ordinary,
+			// converged race), but the cause still has to reach the
+			// operator — without it this message cannot be told apart
+			// from a misclassified insert failure.
+			err = fmt.Errorf("job %s: concurrent register/unregister churn, giving up after one retry: %v", jid, err)
+		}
 		return
 	}
 
-	// DB row exists but no in-memory entry yet (first Register after restart): keep the
-	// persisted NextRunAt as the schedule, attach the closure, and on an interval change
-	// re-anchor NextRunAt + persist (before the in-memory map assignment below).
-	nj := *savedJob
+	return applyPersistedJob(ctx, tenant, jid, startAt, repeatEvery, fn, savedJob)
+}
+
+// applyPersistedJob reconciles a Register call with a DB row that already
+// exists but has no in-memory entry yet: it keeps the persisted NextRunAt as
+// the schedule, attaches the closure, and on an interval change re-anchors
+// NextRunAt to startAt and persists that change (before the in-memory map
+// assignment below). Called with mut already held. Two callers, both in
+// Register above: the ordinary "first Register after restart" path, and the
+// insert-branch duplicate-key convergence (see lib/job/AGENTS.md's
+// Register section) — once a persisted-but-not-yet-in-memory row is in
+// hand, the two cases are otherwise indistinguishable.
+func applyPersistedJob(ctx convCtx.Context, tenant convAuth.Tenant, jid JobID, startAt time.Time, repeatEvery time.Duration, fn JobFunc, saved *job) (err error) {
+	nj := *saved
 	nj.f = fn
-	if savedJob.RepeatEvery != repeatEvery {
+	if saved.RepeatEvery != repeatEvery {
 		nj.RepeatEvery = repeatEvery
 		nj.NextRunAt = startAt // re-anchor on interval change
 		if err = jobsDB.Tenant(tenant).Update(ctx, nj); err != nil {
@@ -165,7 +231,6 @@ func Register(ctx convCtx.Context, tenant convAuth.Tenant, jid JobID, startAt ti
 	}
 	jobs[tenant][jid] = nj
 	wake()
-
 	return
 }
 

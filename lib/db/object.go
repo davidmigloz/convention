@@ -91,6 +91,16 @@ func indexName(table, key string) string {
 // `"object"->'k'`, which a GIN jsonb_ops index cannot serve but the default
 // jsonb btree opclass can. Keys must be scalar leaf fields (btree entry-size
 // limit).
+//
+// Plain CREATE INDEX, never UNIQUE — and adding a unique variant here is not a
+// local change. Insert classifies SQLSTATE 23505 as ErrDuplicateID (see
+// isDuplicateInsertErr in insert.go), and 23505 is raised by ANY unique
+// violation, not only the "id" primary key. A second unique constraint on this
+// table would therefore be misreported as a duplicate id: MutateOrInsert would
+// burn its whole retry budget on a collision no re-read can converge, and
+// lib/job's Register would converge onto a row that is not the one it collided
+// with. Introducing unique indexes means narrowing that classification (by
+// constraint name) first.
 func jsonIndexStatement(table, key string) string {
 	return `CREATE INDEX IF NOT EXISTS "` + indexName(table, key) + `"
 ON "` + table + `" ((` + keyToJsonColumn(key) + `));
