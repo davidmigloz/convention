@@ -330,6 +330,15 @@ the database at return (a written return, by contrast, is a fresh re-read).
 Want a bump anyway (e.g. to record a touch)? Change a field before returning
 from `fn`.
 
+**A successful return does not prove a write happened**: a skipped write and a
+real one are indistinguishable at the call site, so "did *I* win this
+transition?" cannot be read from `Mutate`'s return — and `SafeUpdate`'s CAS
+does not answer it either, since a caller that read after a rival committed
+has a fresh `from` and overwrites instead of conflicting. Build claim, enqueue
+and lease semantics inside `fn`: re-check the row it is handed and return a
+sentinel error when someone else already owns the transition. That error is
+never retried and reaches the caller unwrapped, so `errors.Is` can act on it.
+
 | You need | Use |
 |---|---|
 | Caller handles the conflict itself (HTTP 409) | `SafeUpdate` |

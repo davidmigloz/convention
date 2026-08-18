@@ -477,6 +477,22 @@ timestamp a compute hook already owns) always looks changed to it — forcing
 an unnecessary write whose hooks then overwrite that same field again on the
 way back out. Don't touch compute-owned fields from `fn`.
 
+**A successful return does not prove a write happened**: the no-op skip
+returns `(row, nil)` exactly as a real write does, so `(obj, err)` carries no
+wrote/skipped signal. "Did *I* transition this row?" is therefore
+unanswerable from `Mutate`'s return alone — if a rival already stored
+precisely what `fn` produced, this call writes nothing and still succeeds.
+The CAS guard does not supply the answer either: it rejects a *stale* `from`,
+and a caller that read after the rival committed has a fresh one, so
+`SafeUpdate` proceeds and overwrites rather than conflicting. Claim, enqueue
+and lease semantics must therefore come from `fn` itself — re-check the row
+it is handed and return a sentinel error when another writer already owns the
+transition. `fn`'s error aborts immediately, is never retried
+(`mutateRetryable` covers only `ErrCASConflict` and `ErrLockNotAvailable`),
+and propagates unwrapped, so `errors.Is` reaches it at the call site: the
+conflict arrives as ordinary control flow instead of as a lost race that
+looks like a win.
+
 **Wrong shard-key hint** (must-exist `Mutate`): `shardKeys` is a
 query-routing hint for `SelectByID` only. A wrong hint makes an existing row
 look absent, so `Mutate` returns `ErrObjectNotFound` immediately — same

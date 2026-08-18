@@ -134,6 +134,19 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) mutateReRead(ctx convCtx.Contex
 // state is otherwise identical — the hooks then overwrite that touched
 // field again on the way back out. Don't touch compute-owned fields from fn.
 //
+// A successful return does not prove a write happened: the no-op skip returns
+// (row, nil) exactly as a real write does, so the (obj, err) pair carries no
+// wrote/skipped signal. "Did I transition this row?" is unanswerable from
+// Mutate's return alone — if a rival already stored precisely what fn
+// produced, this call writes nothing and still succeeds. The CAS guard does
+// not supply the answer either: it rejects a stale from, and a caller that
+// read after the rival committed has a fresh one, so SafeUpdate proceeds and
+// overwrites rather than conflicting. Claim, enqueue and lease semantics must
+// come from fn itself — re-check the row it is handed and return a sentinel
+// error when another writer already owns the transition. An fn error aborts
+// immediately, is never retried, and propagates unwrapped, so errors.Is
+// reaches it at the call site.
+//
 // fn contract: it may run up to mutateMaxAttempts times and must be pure or
 // otherwise strictly retry-safe — no irreversible or externally visible side
 // effects inside it. Those belong after Mutate returns success: persist
