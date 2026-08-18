@@ -134,6 +134,35 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) mutateReRead(ctx convCtx.Contex
 // state is otherwise identical — the hooks then overwrite that touched
 // field again on the way back out. Don't touch compute-owned fields from fn.
 //
+// A successful return does not prove a write happened: the no-op skip returns
+// (row, nil) exactly as a real write does, so the (obj, err) pair carries no
+// wrote/skipped signal. "Did I transition this row?" is unanswerable from
+// Mutate's return alone — if a rival already stored precisely what fn
+// produced, this call writes nothing and still succeeds. The CAS guard does
+// not supply the answer either: it rejects a stale from, and a caller that
+// read after the rival committed has a fresh one, so SafeUpdate proceeds and
+// overwrites rather than conflicting. So when a transition implemented with
+// Mutate has to have exactly one winner — a claim, an enqueue, a one-shot
+// flag — decide that inside fn: re-check the row it is handed and return a
+// sentinel error when another writer already owns it. The loop returns at the
+// fn call site, before any retry classification, so that holds even for a
+// sentinel wrapping ErrCASConflict or ErrObjectNotFound — errors the loop
+// would otherwise retry. The caller receives the exact value fn returned, so
+// == identity, errors.As on a concrete type, and an unpolluted message all
+// survive (see the fn contract below).
+//
+// On MutateOrInsert's insert branch fn is handed seed's object rather than a
+// stored row, so there is nothing there to re-check. The one-winner property
+// still holds, by another route: Insert raises ErrDuplicateID, the loop
+// absorbs it into the same retry budget, and the next attempt takes the
+// update branch where the re-check does apply.
+//
+// This is scoped to one optimistic mutation, which is all fn can guard. A
+// holder that must own a row across several writes, or keep owning it while
+// it works and survive its own crash, needs the lease lock instead —
+// Lock(WithLease) + Renew + UpdateGuarded (lock.go) — which fn cannot
+// substitute for: it sees one attempt and nothing after the call returns.
+//
 // fn contract: it may run up to mutateMaxAttempts times and must be pure or
 // otherwise strictly retry-safe — no irreversible or externally visible side
 // effects inside it. Those belong after Mutate returns success: persist

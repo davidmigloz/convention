@@ -477,6 +477,41 @@ timestamp a compute hook already owns) always looks changed to it — forcing
 an unnecessary write whose hooks then overwrite that same field again on the
 way back out. Don't touch compute-owned fields from `fn`.
 
+**A successful return does not prove a write happened**: the no-op skip
+returns `(row, nil)` exactly as a real write does, so `(obj, err)` carries no
+wrote/skipped signal. "Did *I* transition this row?" is therefore
+unanswerable from `Mutate`'s return alone — if a rival already stored
+precisely what `fn` produced, this call writes nothing and still succeeds.
+The CAS guard does not supply the answer either: it rejects a *stale* `from`,
+and a caller that read after the rival committed has a fresh one, so
+`SafeUpdate` proceeds and overwrites rather than conflicting. So when a
+transition implemented with `Mutate` has to have exactly one winner — a
+claim, an enqueue, a one-shot flag — decide that inside `fn`: re-check the
+row it is handed and return a sentinel error when another writer already owns
+it. `mutateLoop` returns at the `fn` call site, *before* any retry
+classification, so that holds even for a sentinel wrapping `ErrCASConflict`
+or `ErrObjectNotFound` — errors the loop would otherwise retry (its retry set
+is wider than `mutateRetryable`: `MutateOrInsert` also absorbs
+`ErrDuplicateID`, and `ErrObjectNotFound` when `seed != nil`). The caller
+receives the exact value `fn` returned, so `==` identity, `errors.As` on a
+concrete type, and an unpolluted message all survive. The conflict arrives as
+ordinary control flow instead of as a lost race that looks like a win.
+
+On `MutateOrInsert`'s **insert branch** `fn` is handed `seed`'s object rather
+than a stored row, so there is nothing there to re-check — and a claim or
+enqueue row usually does not exist yet, which makes that the likelier branch.
+The one-winner property still holds by another route: `Insert` raises
+`ErrDuplicateID`, the loop absorbs it into the same retry budget, and the next
+attempt takes the update branch where the re-check does apply.
+
+This covers one optimistic mutation, which is the whole of what `fn` can
+guard. Ownership that has to outlive the call — a holder writing repeatedly
+while it works, or one that must survive its own crash without wedging the
+row — is a lease, not a `Mutate`: use `Lock(WithLease)` + `Renew` +
+`UpdateGuarded` (see [Pessimistic Locking](#pessimistic-locking--two-modes)
+and the primitive-selection table above). `fn` cannot stand in for it — it
+sees a single attempt and nothing after the call returns.
+
 **Wrong shard-key hint** (must-exist `Mutate`): `shardKeys` is a
 query-routing hint for `SelectByID` only. A wrong hint makes an existing row
 look absent, so `Mutate` returns `ErrObjectNotFound` immediately — same
