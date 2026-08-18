@@ -144,9 +144,18 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) mutateReRead(ctx convCtx.Contex
 // overwrites rather than conflicting. So when a transition implemented with
 // Mutate has to have exactly one winner — a claim, an enqueue, a one-shot
 // flag — decide that inside fn: re-check the row it is handed and return a
-// sentinel error when another writer already owns it. An fn error aborts
-// immediately, is never retried, and propagates unwrapped, so errors.Is
-// reaches it at the call site.
+// sentinel error when another writer already owns it. The loop returns at the
+// fn call site, before any retry classification, so that holds even for a
+// sentinel wrapping ErrCASConflict or ErrObjectNotFound — errors the loop
+// would otherwise retry. The caller receives the exact value fn returned, so
+// == identity, errors.As on a concrete type, and an unpolluted message all
+// survive (see the fn contract below).
+//
+// On MutateOrInsert's insert branch fn is handed seed's object rather than a
+// stored row, so there is nothing there to re-check. The one-winner property
+// still holds, by another route: Insert raises ErrDuplicateID, the loop
+// absorbs it into the same retry budget, and the next attempt takes the
+// update branch where the re-check does apply.
 //
 // This is scoped to one optimistic mutation, which is all fn can guard. A
 // holder that must own a row across several writes, or keep owning it while

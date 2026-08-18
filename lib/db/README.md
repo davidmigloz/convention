@@ -330,24 +330,28 @@ the database at return (a written return, by contrast, is a fresh re-read).
 Want a bump anyway (e.g. to record a touch)? Change a field before returning
 from `fn`.
 
-**A successful return does not prove a write happened**: a skipped write and a
-real one are indistinguishable at the call site, so "did *I* win this
-transition?" cannot be read from `Mutate`'s return — and `SafeUpdate`'s CAS
-does not answer it either, since a caller that read after a rival committed
-has a fresh `from` and overwrites instead of conflicting. When a transition
-you are making with `Mutate` needs exactly one winner — a claim, an enqueue,
-a one-shot flag — decide it inside `fn`: re-check the row it is handed and
-return a sentinel error when someone else already owns it. That error is
-never retried and reaches the caller unwrapped, so `errors.Is` can act on it.
-This guards one mutation only; ownership that has to persist across several
-writes, or survive the holder crashing, is a lease — use `Lock(WithLease)` +
-`Renew` + `UpdateGuarded` (below) instead.
-
 | You need | Use |
 |---|---|
 | Caller handles the conflict itself (HTTP 409) | `SafeUpdate` |
 | Read-modify-write, row must exist | `Mutate` |
 | Read-modify-write, row may not exist yet | `MutateOrInsert` |
+| A transition with exactly one winner (claim, enqueue, one-shot flag) | `Mutate`/`MutateOrInsert` + a re-check inside `fn` (below) |
+| Ownership held across several writes, surviving a crash | `Lock(WithLease)` + `Renew` + `UpdateGuarded` |
+
+**A successful return does not prove a write happened**: a skipped write and a
+real one are indistinguishable at the call site, so "did *I* win this
+transition?" cannot be read from `Mutate`'s return — and `SafeUpdate`'s CAS
+does not answer it either, since a caller that read after a rival committed
+has a fresh `from` and overwrites instead of conflicting. So when a transition
+needs exactly one winner, decide that inside `fn`: re-check the row it is
+handed and return a sentinel error when someone else already owns it. `Mutate`
+returns at the `fn` call site before any retry classification, so that error is
+never retried and arrives as the exact value `fn` returned. (On
+`MutateOrInsert`'s insert branch there is no stored row to re-check; the
+duplicate-key collision on `Insert` sends the next attempt to the update
+branch, where the re-check applies.) This guards one mutation only — ownership
+that has to persist across several writes, or survive the holder crashing, is
+a lease: use `Lock(WithLease)` + `Renew` + `UpdateGuarded` (below) instead.
 
 `fn` may run up to 5 times and must be pure/retry-safe — no side effects
 inside it; do those after `Mutate` returns successfully. See

@@ -488,11 +488,21 @@ and a caller that read after the rival committed has a fresh one, so
 transition implemented with `Mutate` has to have exactly one winner — a
 claim, an enqueue, a one-shot flag — decide that inside `fn`: re-check the
 row it is handed and return a sentinel error when another writer already owns
-it. `fn`'s error aborts immediately, is never retried
-(`mutateRetryable` covers only `ErrCASConflict` and `ErrLockNotAvailable`),
-and propagates unwrapped, so `errors.Is` reaches it at the call site: the
-conflict arrives as ordinary control flow instead of as a lost race that
-looks like a win.
+it. `mutateLoop` returns at the `fn` call site, *before* any retry
+classification, so that holds even for a sentinel wrapping `ErrCASConflict`
+or `ErrObjectNotFound` — errors the loop would otherwise retry (its retry set
+is wider than `mutateRetryable`: `MutateOrInsert` also absorbs
+`ErrDuplicateID`, and `ErrObjectNotFound` when `seed != nil`). The caller
+receives the exact value `fn` returned, so `==` identity, `errors.As` on a
+concrete type, and an unpolluted message all survive. The conflict arrives as
+ordinary control flow instead of as a lost race that looks like a win.
+
+On `MutateOrInsert`'s **insert branch** `fn` is handed `seed`'s object rather
+than a stored row, so there is nothing there to re-check — and a claim or
+enqueue row usually does not exist yet, which makes that the likelier branch.
+The one-winner property still holds by another route: `Insert` raises
+`ErrDuplicateID`, the loop absorbs it into the same retry budget, and the next
+attempt takes the update branch where the re-check does apply.
 
 This covers one optimistic mutation, which is the whole of what `fn` can
 guard. Ownership that has to outlive the call — a holder writing repeatedly
