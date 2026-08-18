@@ -334,10 +334,14 @@ from `fn`.
 real one are indistinguishable at the call site, so "did *I* win this
 transition?" cannot be read from `Mutate`'s return — and `SafeUpdate`'s CAS
 does not answer it either, since a caller that read after a rival committed
-has a fresh `from` and overwrites instead of conflicting. Build claim, enqueue
-and lease semantics inside `fn`: re-check the row it is handed and return a
-sentinel error when someone else already owns the transition. That error is
+has a fresh `from` and overwrites instead of conflicting. When a transition
+you are making with `Mutate` needs exactly one winner — a claim, an enqueue,
+a one-shot flag — decide it inside `fn`: re-check the row it is handed and
+return a sentinel error when someone else already owns it. That error is
 never retried and reaches the caller unwrapped, so `errors.Is` can act on it.
+This guards one mutation only; ownership that has to persist across several
+writes, or survive the holder crashing, is a lease — use `Lock(WithLease)` +
+`Renew` + `UpdateGuarded` (below) instead.
 
 | You need | Use |
 |---|---|

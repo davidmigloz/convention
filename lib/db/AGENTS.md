@@ -484,14 +484,23 @@ unanswerable from `Mutate`'s return alone — if a rival already stored
 precisely what `fn` produced, this call writes nothing and still succeeds.
 The CAS guard does not supply the answer either: it rejects a *stale* `from`,
 and a caller that read after the rival committed has a fresh one, so
-`SafeUpdate` proceeds and overwrites rather than conflicting. Claim, enqueue
-and lease semantics must therefore come from `fn` itself — re-check the row
-it is handed and return a sentinel error when another writer already owns the
-transition. `fn`'s error aborts immediately, is never retried
+`SafeUpdate` proceeds and overwrites rather than conflicting. So when a
+transition implemented with `Mutate` has to have exactly one winner — a
+claim, an enqueue, a one-shot flag — decide that inside `fn`: re-check the
+row it is handed and return a sentinel error when another writer already owns
+it. `fn`'s error aborts immediately, is never retried
 (`mutateRetryable` covers only `ErrCASConflict` and `ErrLockNotAvailable`),
 and propagates unwrapped, so `errors.Is` reaches it at the call site: the
 conflict arrives as ordinary control flow instead of as a lost race that
 looks like a win.
+
+This covers one optimistic mutation, which is the whole of what `fn` can
+guard. Ownership that has to outlive the call — a holder writing repeatedly
+while it works, or one that must survive its own crash without wedging the
+row — is a lease, not a `Mutate`: use `Lock(WithLease)` + `Renew` +
+`UpdateGuarded` (see [Pessimistic Locking](#pessimistic-locking--two-modes)
+and the primitive-selection table above). `fn` cannot stand in for it — it
+sees a single attempt and nothing after the call returns.
 
 **Wrong shard-key hint** (must-exist `Mutate`): `shardKeys` is a
 query-routing hint for `SelectByID` only. A wrong hint makes an existing row

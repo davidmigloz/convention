@@ -141,11 +141,18 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) mutateReRead(ctx convCtx.Contex
 // produced, this call writes nothing and still succeeds. The CAS guard does
 // not supply the answer either: it rejects a stale from, and a caller that
 // read after the rival committed has a fresh one, so SafeUpdate proceeds and
-// overwrites rather than conflicting. Claim, enqueue and lease semantics must
-// come from fn itself — re-check the row it is handed and return a sentinel
-// error when another writer already owns the transition. An fn error aborts
+// overwrites rather than conflicting. So when a transition implemented with
+// Mutate has to have exactly one winner — a claim, an enqueue, a one-shot
+// flag — decide that inside fn: re-check the row it is handed and return a
+// sentinel error when another writer already owns it. An fn error aborts
 // immediately, is never retried, and propagates unwrapped, so errors.Is
 // reaches it at the call site.
+//
+// This is scoped to one optimistic mutation, which is all fn can guard. A
+// holder that must own a row across several writes, or keep owning it while
+// it works and survive its own crash, needs the lease lock instead —
+// Lock(WithLease) + Renew + UpdateGuarded (lock.go) — which fn cannot
+// substitute for: it sees one attempt and nothing after the call returns.
 //
 // fn contract: it may run up to mutateMaxAttempts times and must be pure or
 // otherwise strictly retry-safe — no irreversible or externally visible side
