@@ -189,8 +189,11 @@ func newCorruptedFixturePair(t *testing.T, ctx convCtx.Context, suffix string) (
 // newCorruptedMessagesFixture inserts one Message on every shard of the
 // two-shard "messages" vault and corrupts the row on the *last* shard, so a
 // where-less read exhausts at least one whole shard before it fails. It
-// returns every shard handle in the same order SelectAll walks them
-// (RawDBs preserves config order — see raw_access_test.go).
+// returns every shard handle SelectAll will walk. Not merely "the same
+// order": RawDBs delegates straight to DBs(vault, tenant) after preparing,
+// which is the identical call SelectAll makes, so the assertions run against
+// the very slice the read iterated rather than a parallel one that happens
+// to agree.
 //
 // Cleanup mirrors cleanupComplexFixtures: it skips the delete while any
 // shard still shows a leaked connection, because on a pre-fix red run that
