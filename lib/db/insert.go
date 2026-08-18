@@ -40,6 +40,12 @@ func isDuplicateInsertErr(err error, engine Engine) bool {
 	return engine == EngineSqlite3 && strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
+// Insert writes obj as a new runtime row on the shard its own DBKey().ShardKey
+// routes to, snapshots it into the history table, and stamps created/updated
+// metadata from ctx. It never overwrites: a row already existing under the same
+// id fails with ErrDuplicateID, wrapped together with the id and the underlying
+// driver error (errors.Is/As reach all three). Use Upsert to overwrite, or
+// MutateOrInsert for read-modify-write semantics that absorb the insert race.
 func (tos TenantObjectSet[objT, idT, shardKeyT]) Insert(ctx convCtx.Context, obj objT) (err error) {
 
 	err = tos.prepare()

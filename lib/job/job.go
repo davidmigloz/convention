@@ -50,6 +50,11 @@ var (
 // injecting a peer replica's concurrent Insert/Delete right at the point a
 // real race would land. Nil in production; see export_test.go's
 // SetRegisterInsertRaceHookForTest.
+//
+// The hook runs with mut held (Register takes it for its whole body), so a
+// hook that calls back into Register/Unregister self-deadlocks. Write
+// directly against jobsDB instead — that is what the ...ForTest row helpers
+// in export_test.go are for.
 var registerInsertRaceHookForTest func()
 
 // Lease tuning for the per-execution job lock. jobRenewInterval must stay well
@@ -192,7 +197,12 @@ func Register(ctx convCtx.Context, tenant convAuth.Tenant, jid JobID, startAt ti
 			return
 		}
 		if errors.Is(err, convDB.ErrDuplicateID) {
-			err = fmt.Errorf("job %s: concurrent register/unregister churn, giving up after one retry", jid)
+			// %v, not %w: deliberately NOT ErrDuplicateID-matchable (a
+			// caller must not mistake persistent churn for the ordinary,
+			// converged race), but the cause still has to reach the
+			// operator — without it this message cannot be told apart
+			// from a misclassified insert failure.
+			err = fmt.Errorf("job %s: concurrent register/unregister churn, giving up after one retry: %v", jid, err)
 		}
 		return
 	}
@@ -204,9 +214,9 @@ func Register(ctx convCtx.Context, tenant convAuth.Tenant, jid JobID, startAt ti
 // exists but has no in-memory entry yet: it keeps the persisted NextRunAt as
 // the schedule, attaches the closure, and on an interval change re-anchors
 // NextRunAt to startAt and persists that change (before the in-memory map
-// assignment below). Called with mut already held. Two callers: the
-// ordinary "first Register after restart" path below, and Register's
-// insert-branch duplicate-key convergence above (see lib/job/AGENTS.md's
+// assignment below). Called with mut already held. Two callers, both in
+// Register above: the ordinary "first Register after restart" path, and the
+// insert-branch duplicate-key convergence (see lib/job/AGENTS.md's
 // Register section) — once a persisted-but-not-yet-in-memory row is in
 // hand, the two cases are otherwise indistinguishable.
 func applyPersistedJob(ctx convCtx.Context, tenant convAuth.Tenant, jid JobID, startAt time.Time, repeatEvery time.Duration, fn JobFunc, saved *job) (err error) {

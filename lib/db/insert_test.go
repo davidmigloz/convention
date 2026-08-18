@@ -46,9 +46,7 @@ func Test_Insert(t *testing.T) {
 
 // Test_Insert_DuplicateID inserts a row, then inserts the same ID again and
 // asserts the failure is classified as ErrDuplicateID (errors.Is-reachable)
-// while the underlying driver message is still reachable via Error() — see
-// PR B commit 1's plan: today (before the production change) this fails red
-// (errors.Is is false, and the caller sees only the raw driver error).
+// while the underlying driver message is still reachable via Error().
 func Test_Insert_DuplicateID(t *testing.T) {
 
 	ctx := convCtx.New(

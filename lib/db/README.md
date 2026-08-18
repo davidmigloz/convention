@@ -365,7 +365,7 @@ wrong-shard-hint failure mode, and the duplicate-key classification detail.
 
 | Error | Cause | Typical HTTP |
 |---|---|---|
-| `ErrDuplicateID` | Also returned directly by plain `Insert` on a primary-key violation, not only via `MutateOrInsert` exhaustion: `MutateOrInsert` exhausted its retries absorbing duplicate-key insert races (rare — these normally converge before exhaustion) | 409 |
+| `ErrDuplicateID` | A primary-key violation on `Insert`; also surfaced by `MutateOrInsert` once its retry budget is exhausted absorbing insert races (rare — these normally converge first) | 409 |
 | `ErrObjectVanished` | The write succeeded, but the row was gone on the immediate post-write re-read | no clean analogue — the write committed; this is the caller's decision to make, not ours to prescribe |
 
 `Mutate` and `MutateOrInsert` surface `ErrCASConflict` / `ErrLockNotAvailable`
