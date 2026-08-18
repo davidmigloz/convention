@@ -38,6 +38,7 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) Process(ctx convCtx.Context, wh
 		if err != nil {
 			return
 		}
+		defer rows.Close() // see select.go's SelectAll for why deferring inside this loop is safe
 
 		for rows.Next() {
 
@@ -65,6 +66,11 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) Process(ctx convCtx.Context, wh
 			}
 
 			count++
+		}
+		if err = rows.Err(); err != nil {
+			// count already reflects every row successfully processed
+			// before the driver reported this iteration error.
+			return
 		}
 
 	}
@@ -102,6 +108,7 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) ProcessWithMetadata(ctx convCtx
 		if err != nil {
 			return
 		}
+		defer rows.Close() // see select.go's SelectAll for why deferring inside this loop is safe
 
 		for rows.Next() {
 
@@ -130,6 +137,11 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) ProcessWithMetadata(ctx convCtx
 			}
 
 			count++
+		}
+		if err = rows.Err(); err != nil {
+			// count already reflects every row successfully processed
+			// before the driver reported this iteration error.
+			return
 		}
 
 	}

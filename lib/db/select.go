@@ -32,6 +32,19 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) SelectAll(ctx convCtx.Context) 
 			return
 		}
 
+		// rows.Close is deferred rather than closed at the bottom of this
+		// shard's iteration: defers are function-scoped, not
+		// loop-iteration-scoped, so they accumulate across every shard in
+		// this range and only actually run when SelectAll returns. That is
+		// safe and correct here: (a) a happy-path shard's rows already
+		// auto-close the moment Next() reports exhaustion, releasing the
+		// connection immediately — the later deferred Close on those same,
+		// already-closed rows is a documented no-op; (b) an early error
+		// return runs every accumulated defer, so whichever single cursor
+		// is still open (at most one — earlier shards already exhausted
+		// theirs) gets closed.
+		defer rows.Close()
+
 		for rows.Next() {
 
 			var (
@@ -62,6 +75,9 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) SelectAll(ctx convCtx.Context) 
 
 			obs = append(obs, obj)
 		}
+		if err = rows.Err(); err != nil {
+			return
+		}
 
 	}
 
@@ -91,6 +107,7 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) SelectAllWithMetadata(ctx convC
 		if err != nil {
 			return
 		}
+		defer rows.Close() // see SelectAll above for why deferring inside this loop is safe
 
 		for rows.Next() {
 
@@ -121,6 +138,9 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) SelectAllWithMetadata(ctx convC
 			}
 
 			obs = append(obs, ObjectWithMetadata[objT]{obj, md})
+		}
+		if err = rows.Err(); err != nil {
+			return
 		}
 
 	}
@@ -258,6 +278,7 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) Select(ctx convCtx.Context, whe
 		if err != nil {
 			return
 		}
+		defer rows.Close() // see SelectAll above for why deferring inside this loop is safe
 
 		for rows.Next() {
 
@@ -288,6 +309,9 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) Select(ctx convCtx.Context, whe
 			}
 
 			obs = append(obs, obj)
+		}
+		if err = rows.Err(); err != nil {
+			return
 		}
 
 	}
@@ -324,6 +348,7 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) SelectWithMetadata(ctx convCtx.
 		if err != nil {
 			return
 		}
+		defer rows.Close() // see SelectAll above for why deferring inside this loop is safe
 
 		for rows.Next() {
 
@@ -354,6 +379,9 @@ func (tos TenantObjectSet[objT, idT, shardKeyT]) SelectWithMetadata(ctx convCtx.
 			}
 
 			obs = append(obs, ObjectWithMetadata[objT]{obj, md})
+		}
+		if err = rows.Err(); err != nil {
+			return
 		}
 
 	}
