@@ -60,6 +60,7 @@ dependencies:
 | [auth](./auth/) | `convAuth` | JWT authentication and role-based access control |
 | [api](./api/) | `convAPI` | Type-safe HTTP API framework with OpenAPI generation |
 | [db](./db/) | `convDB` | Multi-tenant sharded database with ORM |
+| [lifecycle](./lifecycle/) | `convLifecycle` | Bounded signal-driven service shutdown |
 
 ### Cross-Platform Packages (Go + Dart)
 
@@ -107,6 +108,13 @@ Type-safe HTTP API framework using Go generics. Define APIs as structs with auto
 Multi-tenant sharded database abstraction with JSONB storage, automatic history tracking, and full-text search. Supports PostgreSQL and SQLite backends with CRC32-based shard routing.
 
 → See [db/README.md](./db/README.md)
+
+### lifecycle - Service Lifecycle
+
+Run a service until SIGINT, SIGTERM, or listener completion, then execute named
+shutdown stages concurrently under one deadline.
+
+→ See [lifecycle/README.md](./lifecycle/README.md)
 
 ### localized - Localization
 
