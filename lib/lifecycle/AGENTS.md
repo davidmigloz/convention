@@ -14,6 +14,8 @@ and one bounded deadline shared by all shutdown phases.
 - Signal completion reports the shutdown result through `OnSignalShutdown` and
   returns the same error.
 - Stage errors retain declaration order and include their stage name.
+- When the deadline expires before a stage publishes its result, the stage is
+  reported with the context deadline error; errors returned later are not seen.
 - Validation rejects a nil embedded context, missing or empty shutdown phases,
   duplicate stage names, and incomplete stages before starting the listener.
 

@@ -55,6 +55,10 @@ context values remain available. Phases run sequentially, stages within one
 phase run concurrently, and errors retain phase and stage declaration order
 with the stage name attached.
 
+If the deadline expires before a stage publishes its result, that stage is
+reported with the context deadline error. An error returned afterward is not
+observed by `Run`.
+
 A stage that ignores cancellation does not block `Run` past the deadline, but
 its goroutine can continue afterward. Use this package only on a terminal
 process-shutdown path, and make shutdown stages honor their context whenever

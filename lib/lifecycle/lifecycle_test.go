@@ -180,6 +180,20 @@ func TestShutdownConvertsStagePanicToNamedError(t *testing.T) {
 	}
 }
 
+func TestShutdownPreservesPanickedError(t *testing.T) {
+	sentinel := errors.New("corrupt write-ahead log")
+	err := shutdown(testContext(), time.Second, [][]Stage{{{
+		Name: "flush write-ahead log",
+		Fn: func(convCtx.Context) error {
+			panic(sentinel)
+		},
+	}}})
+
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("shutdown() error = %v, want wrapped panic error %v", err, sentinel)
+	}
+}
+
 func TestShutdownCompletesDrainBeforeClosingDependency(t *testing.T) {
 	drainStarted := make(chan struct{})
 	drainCompleted := make(chan struct{})
@@ -376,7 +390,13 @@ func TestRunSignalCallbacksAreOrderedAndExactlyOnce(t *testing.T) {
 	releaseListenerOnce := sync.OnceFunc(func() { close(releaseListener) })
 	t.Cleanup(releaseListenerOnce)
 	signals := make(chan os.Signal, 1)
+	var callbacksMu sync.Mutex
 	var callbacks []string
+	recordCallback := func(callback string) {
+		callbacksMu.Lock()
+		defer callbacksMu.Unlock()
+		callbacks = append(callbacks, callback)
+	}
 
 	result := make(chan error, 1)
 	go func() {
@@ -389,17 +409,17 @@ func TestRunSignalCallbacksAreOrderedAndExactlyOnce(t *testing.T) {
 			},
 			ShutdownTimeout: time.Second,
 			Stages: [][]Stage{{{Name: "cleanup", Fn: func(convCtx.Context) error {
-				callbacks = append(callbacks, "stage")
+				recordCallback("stage")
 				return nil
 			}}}},
 			OnSignal: func(convCtx.Context) {
-				callbacks = append(callbacks, "signal")
+				recordCallback("signal")
 			},
 			OnSignalShutdown: func(_ convCtx.Context, err error) {
 				if err != nil {
 					t.Errorf("OnSignalShutdown() error = %v", err)
 				}
-				callbacks = append(callbacks, "shutdown")
+				recordCallback("shutdown")
 				releaseListenerOnce()
 			},
 		}, signals)
@@ -411,7 +431,10 @@ func TestRunSignalCallbacksAreOrderedAndExactlyOnce(t *testing.T) {
 		t.Fatalf("run() error = %v", err)
 	}
 	<-listenerFinished
-	if got, want := strings.Join(callbacks, ","), "signal,stage,shutdown"; got != want {
+	callbacksMu.Lock()
+	got := strings.Join(callbacks, ",")
+	callbacksMu.Unlock()
+	if want := "signal,stage,shutdown"; got != want {
 		t.Fatalf("callback order = %q, want %q", got, want)
 	}
 }
