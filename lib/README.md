@@ -18,6 +18,7 @@ Building a Convention-compliant agent typically involves:
 3. **Authentication**: Use `auth` to validate JWT tokens and enforce role-based access control
 4. **API Definition**: Use `api` to define type-safe HTTP endpoints as Go structs with automatic routing and OpenAPI generation
 5. **Database**: Use `db` for multi-tenant, sharded database operations with automatic history tracking
+6. **Lifecycle**: Use `lifecycle` to serve until a signal or listener failure and run ordered shutdown phases under one deadline
 
 See individual package documentation for detailed examples and usage patterns.
 
@@ -31,6 +32,7 @@ go get github.com/sofmon/convention/lib/auth
 go get github.com/sofmon/convention/lib/cfg
 go get github.com/sofmon/convention/lib/ctx
 go get github.com/sofmon/convention/lib/db
+go get github.com/sofmon/convention/lib/lifecycle
 ```
 
 ### Dart
@@ -112,7 +114,7 @@ Multi-tenant sharded database abstraction with JSONB storage, automatic history 
 ### lifecycle - Service Lifecycle
 
 Run a service until SIGINT, SIGTERM, or listener completion, then execute named
-shutdown stages concurrently under one deadline.
+shutdown phases in order under one deadline.
 
 → See [lifecycle/README.md](./lifecycle/README.md)
 
@@ -150,7 +152,7 @@ Automatic bidirectional state synchronization with REST APIs. Hash-based caching
 
 All Go packages follow consistent conventions:
 
-- **Import naming**: `convAPI`, `convAuth`, `convCfg`, `convCtx`, `convDB`
+- **Import naming**: `convAPI`, `convAuth`, `convCfg`, `convCtx`, `convDB`, `convLifecycle`
 - **Context-first**: Functions take `ctx convCtx.Context` as the first parameter
 - **Named error returns**: Use `defer ctx.Exit(&err)` for automatic error wrapping with scope
 - **Configuration**: Read from `/etc/agent/` using the `cfg` package
