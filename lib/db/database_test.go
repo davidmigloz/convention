@@ -47,13 +47,20 @@ func Test_open_and_close(t *testing.T) {
 // connections and Open() rebuilds them, an ObjectSet that was already
 // prepared against the *old* connections must still work.
 //
-// It did not. Close() reset dbs/dbsOnce so Open() could run again, but left
-// both halves of the preparation state behind: each objectSet's `prepared`
-// flag (unreachable from Close — object sets are package-level pointers held
-// by callers) and the global typeToTable registry. A reopened in-memory
-// SQLite database is empty, so every later query hit "no such table". That is
-// the whole of the `go test ./lib/db/ -count=2` failure: pass two runs
-// against databases whose tables were never recreated.
+// It did not. Close() reset dbs/dbsOnce so Open() could run again but left
+// the global typeToTable registry populated, so the next prepare() found its
+// hit and returned before issuing its CREATE TABLE IF NOT EXISTS. A reopened
+// in-memory SQLite database is empty, so every later query hit "no such
+// table". That is the whole of the `go test ./lib/db/ -count=2` failure:
+// pass two runs against databases whose tables were never recreated.
+//
+// That registry is the only preparation state that can go stale here.
+// objectSet's `prepared` field looks like a second one, but nothing in the
+// package ever assigns it, and Tenant() takes a value receiver — prepare()
+// only ever mutates a per-call copy, so an assignment would not persist
+// anyway. Wiring that field up (or giving Tenant a pointer receiver) would
+// reintroduce prepared state Close() has no handle on, and this test would
+// go red again.
 func Test_object_set_usable_after_close_and_reopen(t *testing.T) {
 
 	ctx := convCtx.New(convAuth.Claims{User: convAuth.User(t.Name())})
@@ -77,20 +84,26 @@ func Test_object_set_usable_after_close_and_reopen(t *testing.T) {
 		t.Fatalf("Insert after close+reopen failed: %v", err)
 	}
 
+	// Registered here rather than written as the last statement of the test:
+	// t.Fatalf runs cleanups but never the rest of the body, so every
+	// assertion below — the ones this test exists to make — would otherwise
+	// leak this row on failure. Several tests in this package assert an
+	// absolute row count over the whole "messages" vault, and they run later
+	// in this same pass, so the leak turns one real failure into four
+	// (101/201/301) with three of them pointing at innocent files. (The
+	// pre-close row needs no delete: its in-memory database was destroyed
+	// with the connection.)
+	t.Cleanup(func() {
+		if err := messagesDB.Tenant("test").Delete(ctx, after.MessageID); err != nil {
+			t.Errorf("cleanup of the post-reopen fixture failed: %v", err)
+		}
+	})
+
 	got, err := messagesDB.Tenant("test").SelectByID(ctx, after.MessageID)
 	if err != nil {
 		t.Fatalf("SelectByID after close+reopen failed: %v", err)
 	}
 	if got == nil || got.Content != "after-reopen" {
 		t.Fatalf("expected the row written after reopen, got %+v", got)
-	}
-
-	// Delete the surviving fixture. Several tests in this package assert an
-	// absolute row count over the whole "messages" vault, so a row left
-	// behind here fails them on the next pass — the very repeat-safety this
-	// test exists to protect. (The pre-close row needs no delete: its
-	// in-memory database was destroyed with the connection.)
-	if err := messagesDB.Tenant("test").Delete(ctx, after.MessageID); err != nil {
-		t.Fatalf("cleanup of the post-reopen fixture failed: %v", err)
 	}
 }
