@@ -482,6 +482,89 @@ func TestRunReturnsShutdownErrorOnSignal(t *testing.T) {
 	}
 }
 
+func TestRunSignalCompletionReportsListenerFailure(t *testing.T) {
+	listenerErr := errors.New("accept loop failed")
+	releaseListener := make(chan struct{})
+	releaseListenerOnce := sync.OnceFunc(func() { close(releaseListener) })
+	t.Cleanup(releaseListenerOnce)
+	signals := make(chan os.Signal, 1)
+	callbackResult := make(chan error, 1)
+	result := make(chan error, 1)
+
+	go func() {
+		result <- run(testContext(), Config{
+			ListenAndServe: func(convCtx.Context) error {
+				<-releaseListener
+				return listenerErr
+			},
+			ShutdownTimeout: time.Second,
+			Stages: [][]Stage{{{
+				Name: "drain listener",
+				Fn: func(convCtx.Context) error {
+					releaseListenerOnce()
+					return nil
+				},
+			}}},
+			OnSignalShutdown: func(_ convCtx.Context, err error) {
+				callbackResult <- err
+			},
+		}, signals)
+	}()
+
+	signals <- syscall.SIGTERM
+	if err := <-result; !errors.Is(err, listenerErr) {
+		t.Fatalf("run() error = %v, want listener error %v", err, listenerErr)
+	}
+	if callbackErr := <-callbackResult; !errors.Is(callbackErr, listenerErr) {
+		t.Fatalf("OnSignalShutdown() error = %v, want listener error %v", callbackErr, listenerErr)
+	}
+}
+
+func TestRunSignalCompletionIgnoresClosedServerListener(t *testing.T) {
+	releaseListener := make(chan struct{})
+	releaseListenerOnce := sync.OnceFunc(func() { close(releaseListener) })
+	t.Cleanup(releaseListenerOnce)
+	signals := make(chan os.Signal, 1)
+	result := make(chan error, 1)
+
+	go func() {
+		result <- run(testContext(), Config{
+			ListenAndServe: func(convCtx.Context) error {
+				<-releaseListener
+				return http.ErrServerClosed
+			},
+			ShutdownTimeout: time.Second,
+			Stages: [][]Stage{{{
+				Name: "drain http server",
+				Fn: func(convCtx.Context) error {
+					releaseListenerOnce()
+					return nil
+				},
+			}}},
+		}, signals)
+	}()
+
+	signals <- syscall.SIGTERM
+	if err := <-result; err != nil {
+		t.Fatalf("run() error = %v, want nil when a stage stopped the listener", err)
+	}
+}
+
+func TestRunListenerCompletionIgnoresClosedServerError(t *testing.T) {
+	err := run(testContext(), Config{
+		ListenAndServe:  func(convCtx.Context) error { return http.ErrServerClosed },
+		ShutdownTimeout: time.Second,
+		Stages: [][]Stage{{{
+			Name: "cleanup",
+			Fn:   func(convCtx.Context) error { return nil },
+		}}},
+	}, make(chan os.Signal))
+
+	if err != nil {
+		t.Fatalf("run() error = %v, want nil for a listener that was closed on purpose", err)
+	}
+}
+
 func TestRunRegistersSIGTERM(t *testing.T) {
 	listenerStarted := make(chan struct{})
 	listenerFinished := make(chan struct{})
@@ -569,6 +652,52 @@ func TestRunSecondSIGTERMRestoresDefaultTermination(t *testing.T) {
 	}
 	if ctx.Err() != nil {
 		t.Fatalf("second SIGTERM did not terminate blocked shutdown promptly: %v", ctx.Err())
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("helper error = %v, want SIGTERM exit", err)
+	}
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() || status.Signal() != syscall.SIGTERM {
+		t.Fatalf("helper exit status = %v, want SIGTERM", exitErr.Sys())
+	}
+}
+
+func TestRunListenerPathRestoresDefaultTermination(t *testing.T) {
+	const (
+		helperEnv    = "CONVENTION_LIFECYCLE_LISTENER_PATH_HELPER"
+		stageStarted = "listener-path-stage-started"
+	)
+	if os.Getenv(helperEnv) == "1" {
+		err := Run(testContext(), Config{
+			ListenAndServe: func(convCtx.Context) error {
+				return errors.New("listener failed")
+			},
+			ShutdownTimeout: 10 * time.Second,
+			Stages: [][]Stage{{{
+				Name: "context-ignoring cleanup",
+				Fn: func(convCtx.Context) error {
+					_, _ = os.Stdout.WriteString(stageStarted + "\n")
+					if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+						return err
+					}
+					select {}
+				},
+			}}},
+		})
+		t.Fatalf("Run() returned after SIGTERM during listener-path shutdown with error %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRunListenerPathRestoresDefaultTermination$")
+	command.Env = append(os.Environ(), helperEnv+"=1")
+	output, err := command.CombinedOutput()
+	if !strings.Contains(string(output), stageStarted) {
+		t.Fatalf("helper output = %q, want shutdown stage marker", output)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("SIGTERM did not terminate blocked listener-path shutdown promptly: %v", ctx.Err())
 	}
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) {
