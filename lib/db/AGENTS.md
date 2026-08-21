@@ -134,7 +134,19 @@ Simple modulo distribution using CRC32 checksum. This provides:
   use `RawDBs` or `RawDBForShardKey` rather than pairing `EnsurePrepared` with
   the global `DBs` function.
 - `Open()`: Lazy initialization, idempotent (guarded by `sync.Once`).
-- `Close()`: Closes all connections, sets `dbs = nil`, resets the once-guard.
+- `Close()`: Closes all connections, then unconditionally resets the package to
+  its pre-`Open()` state — `dbs = nil`, the once-guard re-armed, `dbsErr = nil`,
+  and the `typeToTable` registry emptied (see
+  [Global Registry](#global-registry)). Clearing the registry is load-bearing:
+  it is what makes the next `prepare()` re-issue its `CREATE TABLE IF NOT
+  EXISTS` instead of short-circuiting on a stale hit against connections that
+  no longer exist. Errors from the individual `db.Close()` calls are joined and
+  returned, but they do **not** skip the reset — returning early would leave
+  `dbs` pointing at handles that were already closed and that `Open()` would
+  never replace, wedging the package for the rest of the process.
+  `Close()` is not safe to call concurrently with any database operation: it
+  rewrites the package globals with no lock, while `prepare()` reads and writes
+  them from whichever goroutine issues a query.
 - Connections are opened from config at `configKeyDatabase = "database"`.
 
 ### Configuration Loading
@@ -163,7 +175,13 @@ type connection struct {
 [object.go:114-216](object.go#L114-L216)
 
 The `prepare()` method:
-1. Checks if already prepared (idempotent)
+1. Checks the `os.prepared` fast path. **Dead code** — nothing in the package
+   ever assigns that field, and `Tenant()` takes a value receiver, so
+   `prepare()` only ever mutates a per-call copy and an assignment would not
+   persist. The `typeToTable` hit in step 3 is the only real short-circuit.
+   Do not "complete" this memo: it would reintroduce prepared state that
+   `Close()` has no handle on, re-breaking Close+Open (see
+   `Test_object_set_usable_after_close_and_reopen`).
 2. Calls `Open()` to ensure connections
 3. Registers type in `typeToTable` if not already registered
 4. Generates table names from type name
@@ -945,6 +963,19 @@ typeToTable = map[Vault]map[reflect.Type]dbTable{}
 - Need to track which types have been initialized per vault
 - Prevents duplicate table creation
 - Stores computed table names for reuse
+
+**Lifetime**: the registry is scoped to a connection generation, **not** to the
+process. `Close()` empties it (see [Connection Management](#connection-management))
+because the entries describe tables on connections it just dropped; the first
+`prepare()` after the next `Open()` therefore re-issues the full DDL script for
+each (vault, type) against every tenant and shard in that vault. On in-memory
+SQLite that recreation is required — the database died with its pool. On
+Postgres the tables survive and the replay is redundant but harmless (every
+statement is `IF NOT EXISTS`), at the cost of an O(tenants x shards x types)
+DDL burst on the first request after each reconnect.
+
+This registry is the **only** cache `Close()` has to invalidate; `prepare()`'s
+`os.prepared` flag is dead (see [ObjectSet Preparation](#objectset-preparation)).
 
 ### dbTable Structure
 [object.go:24-31](object.go#L24-L31)
