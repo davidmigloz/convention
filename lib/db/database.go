@@ -124,6 +124,21 @@ func openInternal() (err error) {
 	return
 }
 
+// Close closes every connection and resets the package to its pre-Open()
+// state, so Open() rebuilds it from config.
+//
+// The reset is unconditional — it runs even when a connection fails to close,
+// and the close errors are joined and returned alongside it. Returning early
+// instead would be the worst of both: the loop below has already called
+// Close() on every handle, so dbs would keep pointing at dead connections
+// that Open() never replaces (the once-guard having already fired) and
+// typeToTable would keep asserting their tables exist, wedging the package
+// for the rest of the process. A close error means "this did not go
+// cleanly", not "nothing happened".
+//
+// Not safe to call concurrently with any database operation: it rewrites the
+// package globals with no lock, while prepare() reads and writes them from
+// whichever goroutine issues a query.
 func Close() (err error) {
 	for _, vault := range dbs {
 		for _, entries := range vault {
@@ -135,18 +150,18 @@ func Close() (err error) {
 			}
 		}
 	}
-	if err != nil {
-		return
-	}
 
 	dbs = nil
 	dbsOnce = sync.Once{} // Reset so Open() can be called again
 	dbsErr = nil
 
-	// The tables these names refer to went away with the connections above
-	// (for in-memory SQLite the whole database did). Keeping the registry
-	// would make the next prepare() short-circuit on a hit and never issue
-	// its CREATE TABLE IF NOT EXISTS.
+	// The registry caches table metadata scoped to the connections above,
+	// which are now closed, so it must not outlive them. On in-memory SQLite
+	// the tables are literally gone (the database died with its pool); on
+	// Postgres they survive and the next prepare() merely re-issues its DDL,
+	// which is harmless because every statement is IF NOT EXISTS. Either
+	// way, keeping the registry would make that prepare() short-circuit on a
+	// hit and never issue its CREATE TABLE IF NOT EXISTS.
 	typeToTable = map[Vault]map[reflect.Type]dbTable{}
 
 	return
