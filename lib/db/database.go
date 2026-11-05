@@ -136,9 +136,11 @@ func openInternal() (err error) {
 // for the rest of the process. A close error means "this did not go
 // cleanly", not "nothing happened".
 //
-// Not safe to call concurrently with any database operation: it rewrites the
-// package globals with no lock, while prepare() reads and writes them from
-// whichever goroutine issues a query.
+// Not safe to call concurrently with any database operation: it rewrites dbs
+// and the Open() once-guard with no lock, while prepare() and the query paths
+// read them from whichever goroutine issues a query. (The type registry is
+// the exception: it is lock-guarded, so concurrent first use of object sets
+// is safe, but Close() still swaps the connections out from under them.)
 func Close() (err error) {
 	for _, vault := range dbs {
 		for _, entries := range vault {
@@ -162,7 +164,9 @@ func Close() (err error) {
 	// which is harmless because every statement is IF NOT EXISTS. Either
 	// way, keeping the registry would make that prepare() short-circuit on a
 	// hit and never issue its CREATE TABLE IF NOT EXISTS.
+	typeToTableMu.Lock()
 	typeToTable = map[Vault]map[reflect.Type]dbTable{}
+	typeToTableMu.Unlock()
 
 	return
 }

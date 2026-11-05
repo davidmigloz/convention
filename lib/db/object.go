@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	convAuth "github.com/sofmon/convention/lib/auth"
 	convCtx "github.com/sofmon/convention/lib/ctx"
@@ -42,7 +43,11 @@ var (
 	matchFirstCap = regexp.MustCompile("(.)([A-Z][a-z]+)")
 	matchAllCap   = regexp.MustCompile("([a-z0-9])([A-Z])")
 
-	typeToTable = map[Vault]map[reflect.Type]dbTable{}
+	// typeToTable is guarded by typeToTableMu. prepare() takes the read lock
+	// for the hit path and the write lock, held across the DDL, for the miss
+	// path, so each type's tables are created once and never concurrently.
+	typeToTable   = map[Vault]map[reflect.Type]dbTable{}
+	typeToTableMu sync.RWMutex
 
 	ErrObjectTypeNotRegistered = errors.New("object type not registered - use NewObjectSet to access vaults")
 )
@@ -183,13 +188,20 @@ func (os *objectSet[objT, idT, shardKeyT]) prepare() (err error) {
 		return
 	}
 
-	if _, ok := typeToTable[os.vault]; !ok {
-		typeToTable[os.vault] = map[reflect.Type]dbTable{}
-	}
-
+	typeToTableMu.RLock()
 	os.table, ok = typeToTable[os.vault][os.objType]
+	typeToTableMu.RUnlock()
 	if ok {
 		return // object already registered for that vault
+	}
+
+	typeToTableMu.Lock()
+	defer typeToTableMu.Unlock()
+
+	// Another goroutine may have registered the type while this one waited.
+	os.table, ok = typeToTable[os.vault][os.objType]
+	if ok {
+		return
 	}
 
 	runtimeTableName := toSnakeCase(os.objType.Name())
@@ -263,6 +275,9 @@ ON "` + runtimeTableName + `" USING gin ("text_search");
 		TextSearch:       os.textSearch,
 	}
 
+	if _, ok := typeToTable[os.vault]; !ok {
+		typeToTable[os.vault] = map[reflect.Type]dbTable{}
+	}
 	typeToTable[os.vault][os.objType] = os.table
 
 	return

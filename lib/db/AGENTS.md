@@ -145,8 +145,11 @@ Simple modulo distribution using CRC32 checksum. This provides:
   `dbs` pointing at handles that were already closed and that `Open()` would
   never replace, wedging the package for the rest of the process.
   `Close()` is not safe to call concurrently with any database operation: it
-  rewrites the package globals with no lock, while `prepare()` reads and writes
-  them from whichever goroutine issues a query.
+  rewrites `dbs` and the once-guard with no lock, while `prepare()` and the
+  query paths read them from whichever goroutine issues a query. The
+  `typeToTable` registry is the exception — it is guarded by `typeToTableMu`
+  (which `Close()` takes to empty it), so concurrent first use of object sets is
+  safe, but `Close()` still swaps the connections out from under them.
 - Connections are opened from config at `configKeyDatabase = "database"`.
 
 ### Configuration Loading
@@ -183,11 +186,20 @@ The `prepare()` method:
    `Close()` has no handle on, re-breaking Close+Open (see
    `Test_object_set_usable_after_close_and_reopen`).
 2. Calls `Open()` to ensure connections
-3. Registers type in `typeToTable` if not already registered
+3. Looks the type up in `typeToTable` under `typeToTableMu.RLock` (hit: done).
+   On a miss it takes the write lock, re-checks, and keeps holding it through
+   steps 4-7, so concurrent first calls neither race on the map (this used to
+   surface as `fatal error: concurrent map writes` at service boot) nor run the
+   same DDL concurrently — Postgres can fail concurrent `CREATE TABLE IF NOT
+   EXISTS` with a catalog unique violation
 4. Generates table names from type name
 5. Creates all tables (runtime, history, lock) with `IF NOT EXISTS`
 6. Creates btree expression indexes for the fields passed to `WithIndexes` (see [Field Indexes](#field-indexes-withindexes))
-7. Stores table metadata in `typeToTable[vault][objType]`
+7. Stores table metadata in `typeToTable[vault][objType]` (creating the
+   per-vault map if needed) before releasing the write lock
+
+Guarded by `Test_concurrent_first_use_of_object_sets_does_not_race` (run with
+`-race`).
 
 **Important**: Table creation happens on first access, not at program start.
 Call `EnsurePrepared()` when transaction setup must guarantee the tables exist
@@ -957,6 +969,9 @@ count, err := objSet.Tenant(t).Process(ctx, where,
 ```go
 typeToTable = map[Vault]map[reflect.Type]dbTable{}
 ```
+
+Every access goes through `typeToTableMu` (an `RWMutex`): readers share it on
+the hit path, and a miss holds the write lock across the DDL.
 
 **Why?**
 - Each `ObjectSet` instance is stateless (just configuration)
