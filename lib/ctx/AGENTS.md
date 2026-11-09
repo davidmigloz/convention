@@ -54,7 +54,9 @@ func processItem(ctx ctx.Context, item Item) {
 | `ctx.go` | Core Context struct, New(), WrapContext(), Agent() |
 | `scope.go` | WithScope(), WithScopef(), Scope(), Exit(), wrapErr() |
 | `workflow.go` | Workflow type, WithWorkflow(), WithNewWorkflow() |
-| `log.go` | Logger(), WithLogger(), defaultLogger() |
+| `log.go` | Logger(), LoggerKeys(), WithLogger(), defaultLogger() |
+| `log_scan.go` | allocation-free scanner: is a line one JSON object with no repeated key? |
+| `log_dedupe.go` | dedupeWriter: io.Writer that renames repeated JSON keys in each log line |
 | `env.go` | Environment type, Environment(), IsProdEnv() |
 | `http.go` | HTTP integration, WithRequest(), Request(), headers |
 | `claims.go` | WithClaims(), Claims(), User() |
@@ -91,6 +93,23 @@ type Environment string
 ## Logger Keys (for structured logs)
 
 - `env`, `agent`, `workflow`, `user`, `scope`, `action`, `now`, `use_agent_claims`
+- Exported as `LoggerKeys() []string` (a fresh slice, in this order). `TestLoggerKeys_MatchLoggerOutput` compares it with a real `Logger()` line, so a new logger key needs its context value set in that test too.
+- `defaultLogger()` also writes the slog built-ins `time`, `level`, `msg` and `source`.
+
+## Log Key Dedupe Writer
+
+`defaultLogger()` is `newDefaultLogger(os.Stdout)`: a `slog.JSONHandler` whose destination is wrapped by `dedupeWriter` (`log_dedupe.go`). slog does not deduplicate keys, and a repeated key in one JSON line makes fluent-bit drop the line or corrupt the value.
+
+- `slog.JSONHandler` writes each record with exactly one `Write` call (one JSON object plus `\n`, under a mutex shared by all derived handlers), so the writer sees whole lines.
+- Guarantee: no JSON object at any depth of a line written by the default logger repeats a key. This holds for whatever the handler produced (LogValuers, empty keys, invalid UTF-8 keys, `json.RawMessage` values), because the writer checks the encoded output, not the attributes.
+- Fast path: `scanner.scan(p, false)` (`log_scan.go`) scans each line without allocating and compares raw key bytes. A clean line is written as is. The scan is linear in line length, so a very long line (such as one holding a decoded response body) costs proportionally more, and one object over 64 keys sends the whole line to the allocating slow path.
+- Slow path: for a line with a repeat, or one the fast scan cannot vouch for (keys with a backslash escape or invalid UTF-8, objects over 64 keys, nesting over 512), the scanner runs again in slow mode. It uses an explicit stack, so nesting depth has no limit, and it compares keys by their decoded value as `encoding/json` does (invalid UTF-8 and lone surrogates decode to U+FFFD).
+- Rename rule: the first occurrence keeps its key. A later repeat in the same object becomes `attr_<key>` if that is free in the object, otherwise `attr<n>_<key>`, where `n` comes from one counter per object that starts at 2 and only grows. The prefix is inserted right after the opening quote of the key token, so the key's own escapes and bytes are kept. Key order is kept. The counter keeps renaming linear in the number of keys.
+- Values are never touched: nothing is decoded or re-encoded except key tokens for comparison. The output equals the input byte for byte except for the inserted prefixes.
+- Input that is not exactly one JSON object is passed through unchanged. Destination errors are returned; after a partial write of a spliced line, `Write` returns the number of input bytes that the written output holds (a partly written inserted prefix counts for nothing).
+- The writer is stateless and does not retain the buffer it is given, so it is safe for concurrent use.
+- Scanners and line buffers are pooled. `putScanner` clears the key maps of every frame and refuses a scanner whose stack exceeds 1024 frames or whose key or rename storage exceeds 4096 entries; line buffers over 64 KB are dropped too, so one huge line does not pin memory.
+- Loggers passed to `WithLogger()` are used as given and are NOT protected.
 
 ## Code Generation Rules
 
@@ -131,6 +150,8 @@ When adding a new context value:
        attrs = append(attrs, loggerKeyNewThing, newThing)
    }
    ```
+
+   Add `loggerKeyNewThing` to `LoggerKeys()` too, and set the value in `TestLoggerKeys_MatchLoggerOutput`.
 
 **Note:** The logger is built lazily from context values when `Logger()` is called. Do NOT call `WithLogger()` in `With*` methods - this prevents duplicate keys in log output.
 

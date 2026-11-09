@@ -2,6 +2,7 @@ package ctx
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"os"
 	"time"
@@ -9,16 +10,25 @@ import (
 	convAuth "github.com/sofmon/convention/lib/auth"
 )
 
-func defaultLogger() *slog.Logger {
-	return slog.New(
-		slog.NewJSONHandler(
-			os.Stdout,
-			&slog.HandlerOptions{
-				Level:     slog.LevelInfo,
-				AddSource: true,
-			},
-		),
-	)
+// defaultLogger writes JSON to stdout through a writer that renames repeated
+// keys, so no attribute can corrupt a line. Loggers passed to WithLogger are
+// used as given and are not protected.
+func defaultLogger() *slog.Logger { return newDefaultLogger(os.Stdout) }
+
+// LoggerKeys returns the top-level keys that every Logger() line may carry, in
+// declaration order. Attributes must not reuse them, nor the slog built-ins
+// time, level, msg and source.
+func LoggerKeys() []string {
+	return []string{
+		loggerKeyEnv,
+		loggerKeyAgent,
+		loggerKeyWorkflow,
+		loggerKeyUser,
+		loggerKeyScope,
+		loggerKeyAction,
+		loggerKeyNow,
+		loggerKeyUseAgentClaims,
+	}
 }
 
 func (ctx Context) Logger() *slog.Logger {
@@ -70,4 +80,10 @@ func (ctx Context) WithLogger(logger *slog.Logger) Context {
 			logger,
 		),
 	}
+}
+
+// newDefaultLogger is the default JSON logger writing to w; the writer wrapper
+// guarantees no repeated keys in any line.
+func newDefaultLogger(w io.Writer) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(newDedupeWriter(w), &slog.HandlerOptions{Level: slog.LevelInfo, AddSource: true}))
 }

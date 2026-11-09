@@ -97,6 +97,10 @@ The context carries a structured logger (`*slog.Logger`) that automatically incl
 - `user` - Current user
 - `scope` - Current scope chain
 - `action` - Current action (e.g., "GET /api/users")
+- `now` - Time override, when set
+- `use_agent_claims` - Present when agent claims are in use
+
+`ctx.LoggerKeys()` returns these eight keys (a new slice on each call, in this order). Together with slog's own `time`, `level`, `msg` and `source`, they are the top-level keys of a log line.
 
 ```go
 ctx.Logger().Info("processing request", "itemCount", len(items))
@@ -106,6 +110,20 @@ ctx.Logger().Debug("detailed info", "state", state)
 // Add custom logger
 ctx = ctx.WithLogger(customLogger)
 ```
+
+#### Key collisions
+
+slog does not deduplicate keys, and log agents such as fluent-bit drop or corrupt a line that repeats a key. The default logger therefore writes through a wrapper that renames a repeated key in the encoded line:
+
+```go
+ctx.Logger().Info("saved", "action", "put", "source", "x")
+// {"time":...,"level":"INFO","source":{...},"msg":"saved","action":"GET /api/users","attr_action":"put","attr_source":"x"}
+```
+
+- No JSON object at any depth of a line repeats a key.
+- The first occurrence keeps its key; a later repeat becomes `attr_<key>`, or `attr<n>_<key>` (n = 2, 3, ...) if that name is taken in the same object. Key order is kept.
+- Values are never changed. A line is written exactly as slog produced it, except for the prefixes inserted into repeated keys.
+- Loggers passed to `WithLogger` are used as given and are not protected.
 
 ### Workflow Tracking
 
