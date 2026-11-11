@@ -26,6 +26,7 @@ const (
 	contextKeyScope
 	contextKeyNow
 	contextKeyLogger
+	contextKeyRequestStart
 
 	loggerKeyEnv            = "env"
 	loggerKeyAgent          = "agent"

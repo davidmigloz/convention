@@ -315,6 +315,10 @@ handler := convAPI.NewHandler(ctx, "api.example.com", 443, authCheck, &API{...})
 http.Handle("/", handler)
 ```
 
+### Call Logging
+
+`svr.EnableCallsLogging()` makes the server log one `API call` line per request that reaches an endpoint (a request refused by the authentication check is answered before the call log), with the request and response (method, URL, headers, bodies) and `duration_ms`: the whole milliseconds from `ServeHTTP` receiving the request until the response write returned (`WriteHeader` for an empty body), read before the entry is built (`ctx.RequestElapsed()`). It is the time until the server handed the response to the connection, not until the client received it. The field is absent when the context carries no stamp. A failed response write logs a warning instead of the line.
+
 ## Helper Functions
 
 ```go

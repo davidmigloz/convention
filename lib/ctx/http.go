@@ -63,6 +63,47 @@ func (ctx Context) WithRequest(r *http.Request, decodeClaims bool) (res Context)
 	return
 }
 
+// requestStamp pairs the arrival time with the clock that produced it, so the
+// elapsed time is read on the same clock even after WithNow or a Time-Now
+// header re-clocks a derived context.
+type requestStamp struct {
+	start time.Time
+	now   func() time.Time
+}
+
+// WithRequestStart records that a request has just been received. A server
+// calls it once, before anything else, on the context it builds the request
+// context from; WithRequest does not stamp, so attaching another request to a
+// derived context never moves the arrival time.
+func (ctx Context) WithRequestStart() Context {
+	clock := ctx.Now
+	if _, fixed := ctx.Value(contextKeyNow).(time.Time); !fixed {
+		// Now strips the monotonic reading with UTC; time.Now keeps it, so a
+		// wall-clock step during the request cannot change the elapsed time.
+		clock = time.Now
+	}
+	return Context{
+		context.WithValue(
+			ctx.Context,
+			contextKeyRequestStart,
+			requestStamp{start: clock(), now: clock},
+		),
+	}
+}
+
+// RequestElapsed returns the time since WithRequestStart, read on the clock
+// the stamped context had: the fixed time of WithNow, which gives 0, or else
+// the system clock with its monotonic reading. A request's Time-Now header and
+// a later WithNow therefore do not change it. ok is false when the context was
+// never stamped.
+func (ctx Context) RequestElapsed() (d time.Duration, ok bool) {
+	stamp, ok := ctx.Value(contextKeyRequestStart).(requestStamp)
+	if !ok {
+		return 0, false
+	}
+	return stamp.now().Sub(stamp.start), true
+}
+
 func (ctx Context) Request() (r *http.Request) {
 	obj := ctx.Value(contextKeyRequest)
 	if obj == nil {

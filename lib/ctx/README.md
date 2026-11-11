@@ -168,6 +168,18 @@ ctx = ctx.WithNow(fixedTime)
 
 In non-production environments, the `Time-Now` HTTP header can override the current time.
 
+### Request Elapsed Time
+
+```go
+// A server stamps the arrival time once, before anything else
+ctx = ctx.WithRequestStart().WithRequest(r, true)
+
+// Time since the stamp; ok is false when the context was never stamped
+elapsed, ok := ctx.RequestElapsed()
+```
+
+`WithRequest` does not stamp, so attaching another request to a derived context never moves the arrival time. `RequestElapsed` reads the clock the stamped context had: `WithNow` on a derived context and the `Time-Now` header do not change it, and it is `0` when the stamped context's own clock is fixed with `WithNow`. Otherwise it reads the system clock with its monotonic reading, so a wall-clock step during the request does not change it.
+
 ### Action Tracking
 
 ```go

@@ -111,7 +111,7 @@ type httpHandler struct {
 }
 
 func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	ctx := h.ctx.WithRequest(r, !h.skipDecodeClaims)
+	ctx := h.ctx.WithRequestStart().WithRequest(r, !h.skipDecodeClaims)
 
 	_, err := h.check(r)
 	if err != nil {
@@ -214,6 +214,8 @@ func logCall(ctx convCtx.Context, w http.ResponseWriter, r *http.Request, handle
 		}
 	}
 
+	elapsed, hasElapsed := ctx.RequestElapsed()
+
 	// Build log entry
 	var reqBodyLog any
 	if reqHasBody {
@@ -233,21 +235,24 @@ func logCall(ctx convCtx.Context, w http.ResponseWriter, r *http.Request, handle
 		}
 	}
 
-	logger.
-		With(
-			slog.Group("request",
-				"method", r.Method,
-				"url", r.URL.String(),
-				slog.Group("headers", headersToAttrs(reqHeaders)...),
-				"body", reqBodyLog,
-			),
-			slog.Group("response",
-				"status", res.StatusCode,
-				slog.Group("headers", headersToAttrs(res.Header)...),
-				"body", resBodyLog,
-			),
-		).
-		Info("API call")
+	attrs := []any{
+		slog.Group("request",
+			"method", r.Method,
+			"url", r.URL.String(),
+			slog.Group("headers", headersToAttrs(reqHeaders)...),
+			"body", reqBodyLog,
+		),
+		slog.Group("response",
+			"status", res.StatusCode,
+			slog.Group("headers", headersToAttrs(res.Header)...),
+			"body", resBodyLog,
+		),
+	}
+	if hasElapsed {
+		attrs = append(attrs, "duration_ms", elapsed.Milliseconds())
+	}
+
+	logger.With(attrs...).Info("API call")
 }
 
 func headersToAttrs(headers http.Header) []any {
