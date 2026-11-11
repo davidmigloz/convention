@@ -76,19 +76,26 @@ type requestStamp struct {
 // context from; WithRequest does not stamp, so attaching another request to a
 // derived context never moves the arrival time.
 func (ctx Context) WithRequestStart() Context {
+	clock := ctx.Now
+	if _, fixed := ctx.Value(contextKeyNow).(time.Time); !fixed {
+		// Now strips the monotonic reading with UTC; time.Now keeps it, so a
+		// wall-clock step during the request cannot change the elapsed time.
+		clock = time.Now
+	}
 	return Context{
 		context.WithValue(
 			ctx.Context,
 			contextKeyRequestStart,
-			requestStamp{start: ctx.Now(), now: ctx.Now},
+			requestStamp{start: clock(), now: clock},
 		),
 	}
 }
 
 // RequestElapsed returns the time since WithRequestStart, read on the clock
-// the stamped context had, so a request's Time-Now header does not change it.
-// ok is false when the context was never stamped. Like Now it is wall-clock
-// arithmetic, so a clock step backwards can give a negative duration.
+// the stamped context had: the fixed time of WithNow, which gives 0, or else
+// the system clock with its monotonic reading. A request's Time-Now header and
+// a later WithNow therefore do not change it. ok is false when the context was
+// never stamped.
 func (ctx Context) RequestElapsed() (d time.Duration, ok bool) {
 	stamp, ok := ctx.Value(contextKeyRequestStart).(requestStamp)
 	if !ok {

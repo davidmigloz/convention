@@ -178,7 +178,7 @@ When adding a new context value:
 
 - Use `WithNow()` to inject fixed time for deterministic tests
 - `WithRequestStart()` captures the context's clock together with the arrival time: stamp after `WithNow(fixed)` to freeze `RequestElapsed()` at 0; a `WithNow()` applied after the stamp, or a `Time-Now` header, does not change it
-- `RequestElapsed()` is `(0, false)` on a context that was never stamped; `WithRequest` never re-stamps, so attaching a request again keeps the first arrival; it is wall-clock arithmetic, so a backwards clock step can make it negative
+- `RequestElapsed()` is `(0, false)` on a context that was never stamped; `WithRequest` never re-stamps, so attaching a request again keeps the first arrival; unless the stamping clock is fixed it reads `time.Now` (not `Now()`, whose `UTC()` strips the monotonic reading), so a wall-clock step cannot change it
 - A context built without configuration is production, which ignores the `Time-Now` header; a test of the header sets `contextKeyEnv` to a non-production value in-package
 - Workflow IDs are UUIDs; mock if needed for reproducible tests
 - Environment defaults to "production" if config unavailable

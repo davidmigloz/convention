@@ -178,7 +178,7 @@ ctx = ctx.WithRequestStart().WithRequest(r, true)
 elapsed, ok := ctx.RequestElapsed()
 ```
 
-`WithRequest` does not stamp, so attaching another request to a derived context never moves the arrival time. `RequestElapsed` reads the clock the stamped context had: `WithNow` on a derived context and the `Time-Now` header do not change it, and it is `0` when the stamped context's own clock is fixed. It is wall-clock arithmetic, so a clock step backwards can give a negative duration.
+`WithRequest` does not stamp, so attaching another request to a derived context never moves the arrival time. `RequestElapsed` reads the clock the stamped context had: `WithNow` on a derived context and the `Time-Now` header do not change it, and it is `0` when the stamped context's own clock is fixed with `WithNow`. Otherwise it reads the system clock with its monotonic reading, so a wall-clock step during the request does not change it.
 
 ### Action Tracking
 

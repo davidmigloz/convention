@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,6 +90,31 @@ func Test_RequestElapsed_reads_the_clock_captured_at_the_stamp(t *testing.T) {
 			d, ok := tt.derive(ctx).RequestElapsed()
 			if !ok || d != 0 {
 				t.Errorf("RequestElapsed() = %v, %v; want exactly 0, true (the stamp's own clock is frozen)", d, ok)
+			}
+		})
+	}
+}
+
+func Test_RequestElapsed_reads_the_monotonic_clock_unless_the_stamping_clock_is_fixed(t *testing.T) {
+	tests := []struct {
+		name          string
+		ctx           Context
+		wantMonotonic bool
+	}{
+		{"a context whose clock is not fixed", New(requestStartClaims), true},
+		{"a context whose clock is fixed", New(requestStartClaims).WithNow(time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stamp := tt.ctx.WithRequestStart().Value(contextKeyRequestStart).(requestStamp)
+
+			// Time.String ends with an "m=" field exactly when the time carries a
+			// monotonic reading, which a wall-clock step cannot move.
+			if got := strings.Contains(stamp.start.String(), "m="); got != tt.wantMonotonic {
+				t.Errorf("the arrival %v: monotonic reading = %v, want %v", stamp.start, got, tt.wantMonotonic)
+			}
+			if got := strings.Contains(stamp.now().String(), "m="); got != tt.wantMonotonic {
+				t.Errorf("the clock reads %v: monotonic reading = %v, want %v", stamp.now(), got, tt.wantMonotonic)
 			}
 		})
 	}
