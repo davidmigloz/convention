@@ -215,6 +215,12 @@ Weight calculation: count of non-parameter segments
 - `/users/{id}/posts` has weight 2 (`users`, `posts`)
 - `/users/{id}` has weight 1 (`users`)
 
+### Path parameter escaping
+
+- **Client** (`newRequest`): every path value is written with `url.PathEscape`, so it is always one segment. `/` → `%2F`, `?` → `%3F`, `#` → `%23`, `%` → `%25`, space → `%20`, non-ASCII is UTF-8 percent-encoded; letters, digits, `-._~` and `:@+$&=` are left as they are.
+- **Server** (`match`): splits `r.URL.EscapedPath()` on `/` and `url.PathUnescape`s each segment before comparing or extracting it. An escaped `/` therefore stays inside its segment; splitting the decoded `r.URL.Path` instead would let a value like `x%2F@projection` match a longer sibling route such as `/assets/{id}/@projection`.
+- Both halves are needed: a value sent by the client is received unchanged by the handler, on the route the client called. Do not revert either to raw writes or decoded-path splitting.
+
 ## API Tag Parsing
 
 Format: `METHOD /path/segments/{param}?query=type|description`
@@ -314,7 +320,7 @@ In `openapi.go`:
 Test files:
 - `api_test.go` - Integration tests
 - `openapi_test.go` - OpenAPI generation tests
-- `descriptor_test.go` - URL parsing/matching tests
+- `descriptor_test.go` - URL parsing/matching tests, path value escaping round trips
 - `error_test.go` - Error handling tests
 - `error_leak_test.go` - Regression tests asserting no internal detail is serialised
 - `error_remote_internal_test.go` - Service-to-service relay sanitisation (internal package)

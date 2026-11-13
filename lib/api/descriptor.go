@@ -351,7 +351,19 @@ func (desc *descriptor) match(r *http.Request) (values values, match bool) {
 		return
 	}
 
-	urlSplit := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	// Split the escaped path, then unescape each segment, so an escaped '/'
+	// (%2F) stays inside its segment. Splitting the decoded r.URL.Path would
+	// turn a value such as "x%2F@projection" into two segments and could
+	// route the request onto a longer sibling endpoint.
+	urlSplit := strings.Split(strings.Trim(r.URL.EscapedPath(), "/"), "/")
+	for i, s := range urlSplit {
+		unescaped, err := url.PathUnescape(s)
+		if err != nil {
+			match = false
+			return
+		}
+		urlSplit[i] = unescaped
+	}
 
 	if len(urlSplit) < len(desc.segments) {
 		match = false
@@ -399,7 +411,9 @@ func (desc *descriptor) newRequest(vls values, body io.Reader) (*http.Request, e
 			if val == "" {
 				return nil, fmt.Errorf("missing value '%s'", segment.Value)
 			}
-			sb.WriteString(val)
+			// Escape the value so it is always exactly one path segment:
+			// a '/', '?', '#' or '%' in it must not change the route.
+			sb.WriteString(url.PathEscape(val))
 			vi++
 		} else {
 			sb.WriteString(segment.Value)

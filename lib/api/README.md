@@ -147,6 +147,8 @@ func handleGetUserPost(ctx convCtx.Context, userId UserID, postId PostID) (Post,
 }
 ```
 
+A path parameter value is always exactly one path segment. The client escapes each value with `url.PathEscape`, so a `/`, `?`, `#`, `%`, space or non-ASCII character in it is sent percent-encoded and cannot change the route, start a query string or fragment, or be decoded twice. The server splits the escaped request path and unescapes each segment, so the handler receives the original value (for example `a/b`) on the route the client called. A value cannot be used to reach a different endpoint; reject values your handler does not expect.
+
 ## API Tag Format
 
 ```
