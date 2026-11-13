@@ -152,6 +152,10 @@ func (os *objectSet[objT, idT, shardKeyT]) Ready() ObjectSetReady[objT, idT, sha
 
 type ObjectSetSetup[objT Object[idT, shardKeyT], idT, shardKeyT ~string] interface {
 	WithTextSearch() ObjectSetSetup[objT, idT, shardKeyT]
+	// WithIndexes builds one btree index per key on the JSON value
+	// ("object"->'k'; a dotted key becomes "object"->'a'->'b'). Raw SQL must
+	// compare that expression, e.g. "object"->'k' = to_jsonb($1::text): a
+	// text comparison on "object"->>'k' cannot use the index and scans the table.
 	WithIndexes(indexes ...string) ObjectSetSetup[objT, idT, shardKeyT]
 	WithCompute(compute func(ctx convCtx.Context, md Metadata, obj *objT) error) ObjectSetSetup[objT, idT, shardKeyT]
 	Ready() ObjectSetReady[objT, idT, shardKeyT]

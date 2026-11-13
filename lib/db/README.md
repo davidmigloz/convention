@@ -491,6 +491,15 @@ Raw full-object queries remain responsible for selecting only live rows with
 a root `"object" IS NOT NULL` predicate and for treating a nil scanned object
 as absent.
 
+A raw predicate on a `WithIndexes` field must compare the indexed JSON
+expression, as the query builder does. Write `"object"->'status' = to_jsonb($1::text)`
+for a parameter and `"object"->'status' = '"active"'::jsonb` for a fixed value.
+`"object"->>'status' = $1` compares text, so Postgres cannot use the index and
+scans the whole table. The two forms return the same rows when the stored value
+is a JSON string; `->>` also matches a number or boolean that prints like the
+parameter. `->>` stays correct in `SELECT` lists, `GROUP BY` and on `_history`
+tables, which carry no field indexes.
+
 ## Configuration
 
 Database connections are configured via the config system (typically `.secret` directory):

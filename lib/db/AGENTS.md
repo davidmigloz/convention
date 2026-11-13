@@ -926,6 +926,12 @@ Contract:
   that sanitise to the same text (`a.b` vs `a_b`) never collide.
 - **Scalar leaf fields only** — btree has an index-entry size limit; do not index a
   whole nested object.
+- **Raw SQL must compare the indexed expression.** `"object"->'k' = to_jsonb($1::text)`
+  (or `= '"word"'::jsonb`) uses the index; `"object"->>'k' = $1` compares text,
+  cannot use it, and scans the table. A raw join or `EXISTS` on a text compare
+  scans once per outer row (a production 504 in a downstream service came from
+  that). The forms match the same rows for JSON-string values only. Only the
+  runtime table is indexed; `_history` tables carry no field indexes.
 
 ### Process vs Select
 
