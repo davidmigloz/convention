@@ -91,7 +91,12 @@ func NewCheck(policy Policy) (check Check, err error) {
 			return target, ErrMissingRequest
 		}
 
-		segments := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		// Split the path exactly as the API router does, so the policy
+		// evaluates the route that will run.
+		segments, ok := PathSegments(r.URL)
+		if !ok {
+			return target, ErrForbidden
+		}
 
 		if publicEndpoints.match(
 			r.Method,

@@ -1,8 +1,10 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"testing"
 )
 
@@ -55,15 +57,13 @@ func Test_descriptor_newRequest_escapesPathValues(t *testing.T) {
 		{"plain id", "abc-123_X.y~", "abc-123_X.y~"},
 		{"id with colons", "entity:member-invitation:1:2", "entity:member-invitation:1:2"},
 		{"email", "first.last+tag@example.com", "first.last+tag@example.com"},
-		{"slash", "a/b", "a%2Fb"},
-		{"slash into sibling route", "x/@projection", "x%2F@projection"},
 		{"already percent encoded slash", "%2F", "%252F"},
 		{"percent", "100%", "100%25"},
 		{"question mark", "a?b=c", "a%3Fb=c"},
 		{"hash", "a#b", "a%23b"},
 		{"space", "a b", "a%20b"},
 		{"non ascii", "müller-ü", "m%C3%BCller-%C3%BC"},
-		{"dot dot", "..", ".."},
+		{"dots inside a value", "a..b", "a..b"},
 	}
 
 	client := newDescriptor("localhost", 443, "GET /assets/{id}", nil, nil)
@@ -105,31 +105,80 @@ func Test_descriptor_newRequest_escapesPathValues(t *testing.T) {
 	}
 }
 
-func Test_descriptor_match_keepsEscapedSlashInSegment(t *testing.T) {
+func Test_descriptor_newRequest_refusesValuesThatAreNotOneSegment(t *testing.T) {
+
+	desc := newDescriptor("localhost", 443, "GET /assets/{id}", nil, nil)
+
+	for _, v := range []string{
+		"a/b", "/", "x/@projection", "../../other/x",
+		".", "..",
+		`a\b`,
+		"a\nb", "a\rb", "a\x00b", "a\x7fb", "a\tb",
+	} {
+		t.Run(strconv.Quote(v), func(t *testing.T) {
+			vls := values{}
+			vls.Add("", v)
+
+			req, err := desc.newRequest(vls, nil)
+			if !errors.Is(err, ErrInvalidPathValue) {
+				t.Errorf("newRequest(%q) error = %v, want ErrInvalidPathValue", v, err)
+			}
+			if req != nil {
+				t.Errorf("newRequest(%q) built a request for %s", v, req.URL)
+			}
+		})
+	}
+}
+
+func Test_descriptor_match_refusesParamsThatAreNotOneSegment(t *testing.T) {
 
 	desc := newDescriptor("localhost", 443, "GET /assets/{id}", nil, nil)
 	sibling := newDescriptor("localhost", 443, "GET /assets/{id}/@projection", nil, nil)
+	open := newDescriptor("localhost", 443, "GET /assets/{id}/{any...}", nil, nil)
 
-	// What net/http builds for an incoming "GET /assets/x%2F@projection".
-	req := &http.Request{Method: "GET", URL: &url.URL{Path: "/assets/x/@projection", RawPath: "/assets/x%2F@projection"}}
-
-	vls, m := desc.match(req)
-	if !m {
-		t.Fatalf("expected match on %s", desc.path())
-	}
-	if got := vls.GetByIndex(0); got != "x/@projection" {
-		t.Errorf("value = %q, want %q", got, "x/@projection")
-	}
-	if _, m := sibling.match(req); m {
-		t.Errorf("escaped slash split into a new segment and matched %s", sibling.path())
+	refused := []string{
+		"/assets/x%2F@projection",
+		"/assets/..%2Fother",
+		"/assets/%2F",
+		"/assets/a%5Cb",
+		"/assets/a%00b",
+		"/assets/a%0Ab",
+		"/assets/.",
+		"/assets/..",
+		"/assets/%2E%2E",
 	}
 
-	// A real '/' still separates segments.
-	req = &http.Request{Method: "GET", URL: &url.URL{Path: "/assets/x/@projection"}}
+	for _, raw := range refused {
+		t.Run(raw, func(t *testing.T) {
+			u, err := url.ParseRequestURI(raw)
+			if err != nil {
+				t.Fatalf("parse %q: %v", raw, err)
+			}
+			req := &http.Request{Method: "GET", URL: u}
+
+			for _, d := range []descriptor{desc, sibling, open} {
+				if vls, m := d.match(req); m {
+					t.Errorf("%s matched %s with %v", raw, d.path(), vls)
+				}
+			}
+		})
+	}
+
+	// A real '/' still separates segments, as before.
+	req := &http.Request{Method: "GET", URL: &url.URL{Path: "/assets/x/@projection"}}
 	if _, m := desc.match(req); m {
 		t.Errorf("unescaped slash should not match %s", desc.path())
 	}
 	if vls, m := sibling.match(req); !m || vls.GetByIndex(0) != "x" {
 		t.Errorf("unescaped slash should match %s with id x, got match=%v vals=%v", sibling.path(), m, vls)
+	}
+
+	// A hand-written target whose raw form is not a valid encoding (a raw '"')
+	// is still split on its raw path, so the encoded '/' is refused, not split.
+	req = &http.Request{Method: "GET", URL: &url.URL{Path: `/assets/x/@projection"`, RawPath: `/assets/x%2F@projection"`}}
+	for _, d := range []descriptor{desc, sibling} {
+		if vls, m := d.match(req); m {
+			t.Errorf("raw %q matched %s with %v", req.URL.RawPath, d.path(), vls)
+		}
 	}
 }

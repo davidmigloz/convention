@@ -134,6 +134,8 @@ Actions support dynamic path matching with the following templates:
 - `{any}` - Matches any single path segment
 - `{any...}` - Matches any remaining path segments (wildcard suffix)
 
+The request path is split into segments before it is unescaped (`PathSegments`), so an encoded slash (`%2F`) stays inside its segment and never acts as a separator. The convention API router splits paths with the same function, so a policy always evaluates the route that runs: `GET /assets/secret%2F@public` is one `{any}` segment under `/assets/`, never the action `GET /assets/{any}/@public`.
+
 ### Examples
 
 ```go
