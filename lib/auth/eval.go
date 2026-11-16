@@ -238,6 +238,12 @@ func (p allowedPath) match(segments []string, claims Claims, target *Target) boo
 		return false
 	}
 	for i := range p {
+		// A policy segment matches one plain segment only. PathSegments keeps
+		// an encoded '/' inside its segment, but an open-route handler reads
+		// the decoded path, so "private%2Fdoc" must not pass as one {any}.
+		if !isPlainSegment(segments[i]) {
+			return false
+		}
 		if !p[i].Match(segments[i], claims, target) {
 			return false
 		}

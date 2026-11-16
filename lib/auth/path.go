@@ -39,3 +39,12 @@ func PathSegments(u *url.URL) (segments []string, ok bool) {
 
 	return segments, true
 }
+
+// isPlainSegment reports whether s can act as exactly one path segment: it
+// holds no '/' or '\' and is not '.' or '..'. The policy compares only
+// such segments, so it can never approve a path the decoded form widens.
+// Control bytes are left to the handler: the remainder of an open grant
+// is not compared at all, and the API router refuses them in params.
+func isPlainSegment(s string) bool {
+	return s != "." && s != ".." && !strings.ContainsAny(s, `/\`)
+}

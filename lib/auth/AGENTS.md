@@ -19,7 +19,7 @@ The auth package implements a two-phase authorization system:
 - **[eval.go](eval.go)** - Authorization evaluation engine
 - **[path.go](path.go)** - `PathSegments`, the request path splitter shared with the `lib/api` router
 - **[eval_test.go](eval_test.go)** - Comprehensive test cases
-- **[path_test.go](path_test.go)** - `PathSegments` cases, and a check that an encoded `/` cannot match a longer public action
+- **[path_test.go](path_test.go)** - `PathSegments` cases; an encoded `/` cannot match a longer public action, and a policy segment matches one plain segment only
 - **[main_test.go](main_test.go)** - Test setup (currently minimal)
 
 ## Core Types
@@ -190,6 +190,8 @@ check := func(r *http.Request) (Target, error) {
 ### 5. Matching Algorithm with Entity-Specific Roles (eval.go:156-197)
 
 **Path splitting.** `PathSegments(u *url.URL)` splits the wire form of the path (`u.RawPath` when it decodes to `u.Path`, otherwise `u.EscapedPath()`) on `/` and then `url.PathUnescape`s each segment. An encoded `/` therefore stays inside one segment. The `lib/api` router (`descriptor.match`) calls the same function, so the check and the router always see the same segments. Splitting the decoded `r.URL.Path` here while the router splits the escaped path would let `/assets/secret%2F@public` pass as a public `.../{any}/@public` action and then run the protected `.../{any}` handler. Keep the two on one function.
+
+**Plain segments only.** `allowedPath.match` refuses a segment that fails `isPlainSegment` (contains `/` or `\`, or is `.` or `..`) before any `allowedSegment.Match`. With the shared split, a policy `{any}` would otherwise match `private%2Fdoc`, and an open `{any...}` route does not run the router's param check while its handler reads the decoded `r.URL.Path` (`lib/storage/handler.go`). So a narrow grant such as `GET /files/{any}/hero.webp` would cover `/files/private/doc/hero.webp`. Only compared segments are checked; the remainder of an open-ended grant is not, and control bytes are left to the handler.
 
 Two-pass evaluation with role validation:
 

@@ -222,6 +222,7 @@ A path param is always one plain segment. `checkPathValue` (descriptor.go) refus
 - **Client** (`newRequest`): returns an error wrapping `ErrInvalidPathValue` for a refused value, so `Call` sends nothing. Every other value is written with `url.PathEscape`: `?` → `%3F`, `#` → `%23`, `%` → `%25`, space → `%20`, non-ASCII is UTF-8 percent-encoded; letters, digits, `-._~` and `:@+$&=` are left as they are.
 - **Server** (`match`): gets the segments from `convAuth.PathSegments(r.URL)`, the same function the authorization check uses. It splits the wire form of the path and unescapes each segment afterwards, so an encoded `/` stays in its segment. A param segment that fails `checkPathValue` does not match, so `GET /assets/x%2F@projection` matches neither `/assets/{id}` nor `/assets/{id}/@projection`, and the request ends in 404.
 - **Check and router agree.** If they split differently, a policy could approve one route while another handler runs. The case: the check splits the decoded path and sees `/assets/secret/@public` (public), while the router sees `/assets/{secret/@public}` (protected). Never give either its own split.
+- **Open routes.** The remainder of an `{any...}` route is not a param, so `match` does not check it, and its handler reads the decoded `r.URL.Path`. The policy covers that gap: a policy segment matches one plain segment only (`lib/auth` `allowedPath.match`), so a public `GET /files/{any}/hero.webp` does not let `/files/private%2Fdoc/hero.webp` through.
 
 ## API Tag Parsing
 
@@ -323,7 +324,7 @@ Test files:
 - `api_test.go` - Integration tests
 - `openapi_test.go` - OpenAPI generation tests
 - `descriptor_test.go` - URL parsing/matching tests, path value escaping and refusal
-- `path_escape_test.go` - End to end: client, `NewHandler` and a real `convAuth.NewCheck` policy; path values never reach another route (swaps `http.DefaultClient.Transport`, so not parallel)
+- `path_escape_test.go` - End to end: client, `NewHandler` and a real `convAuth.NewCheck` policy; path values never reach another route, and an open route's remainder cannot widen a public grant (swaps `http.DefaultClient.Transport`, so not parallel)
 - `error_test.go` - Error handling tests
 - `error_leak_test.go` - Regression tests asserting no internal detail is serialised
 - `error_remote_internal_test.go` - Service-to-service relay sanitisation (internal package)

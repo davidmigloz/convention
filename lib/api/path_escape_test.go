@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -118,6 +119,82 @@ func Test_path_values_cannot_change_the_route(t *testing.T) {
 			}
 			if protectedCalls.Load() != before {
 				t.Errorf("GetAsset.Call(%q) reached the handler", id)
+			}
+		})
+	}
+}
+
+type escapeFilesAPI struct {
+	Files convAPI.Raw `api:"GET /escape/v1/files/{any...}"`
+}
+
+// Test_open_route_remainder_cannot_widen_a_public_grant: an open route's
+// remainder is not a param, so the router does not check it, and its handler
+// reads the decoded path. The policy must therefore not let a narrow public
+// grant ({any}/hero.webp) match a segment that decodes to more than one.
+func Test_open_route_remainder_cannot_widen_a_public_grant(t *testing.T) {
+
+	var (
+		mu     sync.Mutex
+		served []string
+	)
+
+	impl := escapeFilesAPI{
+		Files: convAPI.NewRaw(func(ctx convCtx.Context, w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			served = append(served, r.URL.Path)
+			mu.Unlock()
+			_, _ = io.WriteString(w, r.URL.Path)
+		}),
+	}
+
+	check, err := convAuth.NewCheck(convAuth.Policy{
+		Roles: convAuth.RolePermissions{
+			"escape_file_reader": convAuth.Permissions{"read_files"},
+		},
+		Permissions: convAuth.PermissionActions{
+			"read_files": convAuth.Actions{"GET /escape/v1/files/{any...}"},
+		},
+		Public: convAuth.Actions{"GET /escape/v1/files/{any}/hero.webp"},
+	})
+	if err != nil {
+		t.Fatalf("NewCheck: %v", err)
+	}
+
+	srv := httptest.NewTLSServer(convAPI.NewHandler(convCtx.New(convAuth.Claims{User: "escape-server"}), "127.0.0.1", 0, check, &impl))
+	defer srv.Close()
+
+	tests := []struct {
+		target string
+		status int
+	}{
+		{"/escape/v1/files/pub/hero.webp", http.StatusOK},
+		{"/escape/v1/files/private/doc/hero.webp", http.StatusForbidden},
+		{"/escape/v1/files/private%2Fdoc/hero.webp", http.StatusForbidden},
+		{"/escape/v1/files/pub%2F..%2F..%2Fother/hero.webp", http.StatusForbidden},
+		{"/escape/v1/files/..%2Fx/hero.webp", http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.target, func(t *testing.T) {
+			mu.Lock()
+			served = nil
+			mu.Unlock()
+
+			res, err := srv.Client().Get(srv.URL + tt.target)
+			if err != nil {
+				t.Fatalf("GET: %v", err)
+			}
+			body, _ := io.ReadAll(res.Body)
+			_ = res.Body.Close()
+
+			if res.StatusCode != tt.status {
+				t.Errorf("status = %d (%q), want %d", res.StatusCode, body, tt.status)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if tt.status != http.StatusOK && len(served) != 0 {
+				t.Errorf("handler ran for an unauthenticated request and served %q", served)
 			}
 		})
 	}

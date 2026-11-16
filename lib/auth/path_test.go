@@ -68,6 +68,53 @@ func TestCheck_encodedSlashDoesNotMatchAnotherAction(t *testing.T) {
 	}
 }
 
+// TestCheck_policySegmentMatchesOnePlainSegment: an open-route handler reads
+// the decoded path, so a policy segment must not match a segment that decodes
+// to more than one ('/' or '\'), or to '.' or '..'. Otherwise a narrow public
+// grant such as {any}/hero.webp would cover any depth below it.
+func TestCheck_policySegmentMatchesOnePlainSegment(t *testing.T) {
+
+	check, err := convAuth.NewCheck(convAuth.Policy{
+		Roles: convAuth.RolePermissions{
+			"reader": convAuth.Permissions{"read_files"},
+		},
+		Permissions: convAuth.PermissionActions{
+			"read_files": convAuth.Actions{"GET /x/v1/files/{any...}"},
+		},
+		Public: convAuth.Actions{"GET /x/v1/files/{any}/hero.webp"},
+	})
+	if err != nil {
+		t.Fatalf("NewCheck: %v", err)
+	}
+
+	allowed := []string{
+		"/x/v1/files/pub/hero.webp",
+		"/x/v1/files/a..b/hero.webp",
+	}
+	refused := []string{
+		"/x/v1/files/private%2Fdoc/hero.webp",
+		"/x/v1/files/..%2Fx/hero.webp",
+		"/x/v1/files/pub%2F..%2F..%2Fother/hero.webp",
+		"/x/v1/files/a%5Cb/hero.webp",
+		"/x/v1/files/../hero.webp",
+		"/x/v1/files/./hero.webp",
+		"/x/v1/files/%2E%2E/hero.webp",
+	}
+
+	for _, raw := range allowed {
+		req := &http.Request{Method: "GET", URL: mustParse(t, raw), Header: http.Header{}}
+		if _, err := check(req); err != nil {
+			t.Errorf("unauthenticated %s refused: %v", raw, err)
+		}
+	}
+	for _, raw := range refused {
+		req := &http.Request{Method: "GET", URL: mustParse(t, raw), Header: http.Header{}}
+		if _, err := check(req); err == nil {
+			t.Errorf("unauthenticated %s passed the public action", raw)
+		}
+	}
+}
+
 func mustParse(t *testing.T, raw string) *url.URL {
 	t.Helper()
 	u, err := url.ParseRequestURI(raw)
