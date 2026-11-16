@@ -147,6 +147,14 @@ func handleGetUserPost(ctx convCtx.Context, userId UserID, postId PostID) (Post,
 }
 ```
 
+A path parameter value is always exactly one plain path segment:
+
+- **Refused values.** A value that contains `/`, `\` or a control byte, or is `.` or `..`, is refused on both sides. `Call` returns an error wrapping `convAPI.ErrInvalidPathValue` and sends nothing. The server does not match a request whose param segment decodes to such a value (for example `GET /users/a%2Fb`), so it answers 404 and no handler runs. A handler therefore never receives a param it could join into a path outside its own folder.
+- **Escaped values.** Every other value is sent with `url.PathEscape`, so a `?`, `#`, `%`, space or non-ASCII character is percent-encoded and cannot start a query string or fragment or be decoded twice. The handler receives the original value on the route the client called.
+- **Same route for check and router.** The server splits the path before unescaping it, with the same function as the authorization check (`convAuth.PathSegments`), so the policy always evaluates the route that runs.
+
+Still reject ids your handler does not expect.
+
 ## API Tag Format
 
 ```

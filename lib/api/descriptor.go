@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -8,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"time"
+
+	convAuth "github.com/sofmon/convention/lib/auth"
 )
 
 func newDescriptor(host string, port int, pattern string, in, out reflect.Type) (desc descriptor) {
@@ -351,7 +354,13 @@ func (desc *descriptor) match(r *http.Request) (values values, match bool) {
 		return
 	}
 
-	urlSplit := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	// Same split as the authorization check (convAuth.NewCheck), so the
+	// policy and the router always see the same route.
+	urlSplit, ok := convAuth.PathSegments(r.URL)
+	if !ok {
+		match = false
+		return
+	}
 
 	if len(urlSplit) < len(desc.segments) {
 		match = false
@@ -367,6 +376,12 @@ func (desc *descriptor) match(r *http.Request) (values values, match bool) {
 
 	for i, segment := range desc.segments {
 		if segment.Param {
+			// A param is one plain segment. Refuse an encoded '/' or '\',
+			// '.', '..' or control bytes rather than hand them to the handler.
+			if checkPathValue(urlSplit[i]) != nil {
+				match = false
+				return
+			}
 			values.Add(segment.Value, urlSplit[i])
 			continue
 		}
@@ -399,7 +414,12 @@ func (desc *descriptor) newRequest(vls values, body io.Reader) (*http.Request, e
 			if val == "" {
 				return nil, fmt.Errorf("missing value '%s'", segment.Value)
 			}
-			sb.WriteString(val)
+			if err := checkPathValue(val); err != nil {
+				return nil, fmt.Errorf("invalid value for '%s': %w", segment.Value, err)
+			}
+			// Escape the value so it is always exactly one path segment:
+			// a '?', '#' or '%' in it must not change the route.
+			sb.WriteString(url.PathEscape(val))
 			vi++
 		} else {
 			sb.WriteString(segment.Value)
@@ -411,6 +431,28 @@ func (desc *descriptor) newRequest(vls values, body io.Reader) (*http.Request, e
 	}
 
 	return http.NewRequest(desc.method, sb.String(), body)
+}
+
+// ErrInvalidPathValue is returned by a client call when a path parameter value
+// cannot be sent as one plain path segment.
+var ErrInvalidPathValue = errors.New("path parameter value must be one plain path segment")
+
+// checkPathValue reports whether v can be used as a path parameter value. A
+// value is refused when it contains '/' or '\' or a control byte, or is '.'
+// or '..': each of those can make the value act as more than one segment,
+// on this hop or after a later hop normalizes the path. The client refuses
+// to send such a value and the router refuses to match it.
+func checkPathValue(v string) error {
+	if v == "." || v == ".." {
+		return ErrInvalidPathValue
+	}
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if c == '/' || c == '\\' || c < 0x20 || c == 0x7f {
+			return ErrInvalidPathValue
+		}
+	}
+	return nil
 }
 
 type urlSegment struct {
