@@ -24,7 +24,7 @@ const (
 
 	// An expression index keeps its planner statistics under the index's own
 	// name in pg_stats, and only an ANALYZE of its table creates them. $1 is
-	// the quoted table name, resolved through the search path like the DDL.
+	// the quoted relation name, resolved through the search path like the DDL.
 	missingExpressionStatsQuery = `SELECT EXISTS (
 SELECT 1
 FROM pg_index i
@@ -43,8 +43,17 @@ func quoteIdentifier(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
+// quoteRelation quotes "table" or "schema.table" component by component, so a
+// schema-qualified name stays a qualified relation. Only the first "." splits.
+func quoteRelation(name string) string {
+	if schema, table, ok := strings.Cut(name, "."); ok {
+		return quoteIdentifier(schema) + "." + quoteIdentifier(table)
+	}
+	return quoteIdentifier(name)
+}
+
 func analyzeStatement(table string) string {
-	return "ANALYZE " + quoteIdentifier(table)
+	return "ANALYZE " + quoteRelation(table)
 }
 
 func analyzeTimeoutStatements() []string {
@@ -59,6 +68,8 @@ func isSQLiteDB(db *sql.DB) bool {
 }
 
 // AnalyzeTablesMissingExpressionStats runs ANALYZE once on every given table
+// (each "table", resolved through the search path, or "schema.table"; the name
+// is split on the first "." and each part is quoted)
 // that has a valid index on an expression ("object"->'k' and the like) for
 // which Postgres holds no planner statistics. Such an index is used with a
 // default selectivity guess until its table has been analysed since the index
@@ -101,7 +112,7 @@ func analyzeMissingExpressionStats(ctx convCtx.Context, db *sql.DB, tables []str
 
 func tableMissesExpressionStats(ctx convCtx.Context, db *sql.DB, table string) (missing bool, err error) {
 	err = inAnalyzeTx(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, missingExpressionStatsQuery, quoteIdentifier(table)).Scan(&missing)
+		return tx.QueryRowContext(ctx, missingExpressionStatsQuery, quoteRelation(table)).Scan(&missing)
 	})
 	return
 }

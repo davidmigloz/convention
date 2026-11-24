@@ -225,7 +225,7 @@ that creates an expression index itself can call it afterwards):
   **index name** (statistics of expression columns are stored on the index; the
   `pg_stats` view lists them under its name). A table with such an index gets one
   `ANALYZE "<table>"` per call; invalid indexes (failed or running concurrent
-  builds) are ignored. Table names are quoted (`quoteIdentifier`).
+  builds) are ignored. Table names are `table` or `schema.table`, split on the first `.` and quoted per component (`quoteRelation`); the catalog query and the `ANALYZE` use the same qualified relation.
 - Postgres only. It sniffs `db.Driver()`; a driver whose type name mentions
   `sqlite` makes it a no-op. `prepare()` uses the shard's configured engine.
 - runs each catalog query and each `ANALYZE` in its own transaction starting with
