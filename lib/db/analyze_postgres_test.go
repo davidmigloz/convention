@@ -95,6 +95,22 @@ func pgLastAnalyze(t *testing.T, db *sql.DB, table string, wantSet bool) sql.Nul
 	return last
 }
 
+// pgLastAnalyzeAfter polls until the table's last_analyze is newer than after.
+func pgLastAnalyzeAfter(t *testing.T, db *sql.DB, table string, after time.Time) bool {
+	t.Helper()
+	for i := 0; i < 30; i++ {
+		var last sql.NullTime
+		if err := db.QueryRow(`SELECT last_analyze FROM pg_stat_user_tables WHERE relname = $1`, table).Scan(&last); err != nil {
+			t.Fatal(err)
+		}
+		if last.Valid && last.Time.After(after) {
+			return true
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return false
+}
+
 func pgCtx() (convCtx.Context, *bytes.Buffer) {
 	var buf bytes.Buffer
 	return convCtx.New(convAuth.Claims{User: "analyze-pg-test"}).
@@ -154,16 +170,29 @@ func Test_analyze_postgres_emptyTableAndUnmatchedPartialIndexAreAnalysedEachRunW
 	pgTable(t, db, "pg_an_partial", 100)
 	pgExec(t, db, `CREATE INDEX "pg_an_partial_idx" ON "pg_an_partial" (("object"->'k')) WHERE "object"->>'k' = 'never'`)
 
-	for run := 0; run < 2; run++ {
-		if err := convDB.AnalyzeTablesMissingExpressionStats(ctx, db, "pg_an_empty", "pg_an_partial"); err != nil {
-			t.Fatalf("run %d: %v", run, err)
+	tables := []string{"pg_an_empty", "pg_an_partial"}
+	if err := convDB.AnalyzeTablesMissingExpressionStats(ctx, db, tables...); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	first := map[string]time.Time{}
+	for _, tb := range tables {
+		last := pgLastAnalyze(t, db, tb, true)
+		if !last.Valid {
+			t.Fatalf("%s was not analysed by the first run", tb)
+		}
+		first[tb] = last.Time
+	}
+
+	if err := convDB.AnalyzeTablesMissingExpressionStats(ctx, db, tables...); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	for _, tb := range tables {
+		if !pgLastAnalyzeAfter(t, db, tb, first[tb]) {
+			t.Errorf("%s was not analysed again by the second run", tb)
 		}
 	}
 	if pgHasStats(t, db, "pg_an_empty_idx") || pgHasStats(t, db, "pg_an_partial_idx") {
 		t.Error("expected no statistics for an empty table or an unmatched partial index")
-	}
-	if !pgLastAnalyze(t, db, "pg_an_empty", true).Valid || !pgLastAnalyze(t, db, "pg_an_partial", true).Valid {
-		t.Error("both tables should have been analysed")
 	}
 	if logs.Len() != 0 {
 		t.Errorf("unexpected log output: %s", logs.String())
