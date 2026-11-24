@@ -10,6 +10,7 @@ This document provides implementation details for AI agents working on the `lib/
 
 - **[database.go](database.go)**: Database connection management, sharding logic
 - **[object.go](object.go)**: Object set initialization, table creation, type registration
+- **[analyze.go](analyze.go)**: `AnalyzeTablesMissingExpressionStats`, the post-DDL statistics check `prepare()` runs
 - **[where.go](where.go)**: Query builder implementation
 - **[select.go](select.go)**: Select operations (all variants)
 - **[insert.go](insert.go)**: Insert and upsert operations; classifies runtime-table primary-key violations as `ErrDuplicateID`
@@ -197,6 +198,10 @@ The `prepare()` method:
 6. Creates btree expression indexes for the fields passed to `WithIndexes` (see [Field Indexes](#field-indexes-withindexes))
 7. Stores table metadata in `typeToTable[vault][objType]` (creating the
    per-vault map if needed) before releasing the write lock
+8. After the write lock is released and every shard's DDL has committed, runs
+   `analyzeAfterPrepare` on the Postgres shards for the runtime and history
+   tables (see [Planner Statistics for Expression Indexes](#planner-statistics-for-expression-indexes)).
+   It never runs inside the DDL `Exec`, and `prepare()` ignores its outcome
 
 Guarded by `Test_concurrent_first_use_of_object_sets_does_not_race` (run with
 `-race`).
@@ -204,6 +209,47 @@ Guarded by `Test_concurrent_first_use_of_object_sets_does_not_race` (run with
 **Important**: Table creation happens on first access, not at program start.
 Call `EnsurePrepared()` when transaction setup must guarantee the tables exist
 before opening the transaction.
+
+### Planner Statistics for Expression Indexes
+[analyze.go](analyze.go)
+
+Postgres has planner statistics for an expression index (`("object"->'k')`)
+only after its table was analysed since the index was created; until then it
+guesses selectivity and one query shape can scan the table. A missing statistic
+is silent, so `prepare()` checks for it.
+
+`AnalyzeTablesMissingExpressionStats(ctx, db, tables...)` (exported, so a service
+that creates an expression index itself can call it afterwards):
+- finds, per table, a **valid** index with `pg_index.indexprs IS NOT NULL` and no
+  `pg_stats` row whose `schemaname`/`tablename` are the index's schema and
+  **index name** (statistics of expression columns are stored on the index; the
+  `pg_stats` view lists them under its name). A table with such an index gets one
+  `ANALYZE "<table>"` per call; invalid indexes (failed or running concurrent
+  builds) are ignored. Table names are quoted (`quoteIdentifier`).
+- Postgres only. It sniffs `db.Driver()`; a driver whose type name mentions
+  `sqlite` makes it a no-op. `prepare()` uses the shard's configured engine.
+- runs each catalog query and each `ANALYZE` in its own transaction starting with
+  `SET LOCAL lock_timeout` (`analyzeLockTimeout`, 2 s) and `SET LOCAL
+  statement_timeout` (`analyzeStatementTimeout`, 30 s), so nothing leaks to the
+  pooled connection and a failed statement cannot poison the next table.
+- logs every error as a warning through `ctx.Logger()` and always returns `nil`.
+  `prepare()` therefore succeeds exactly as before; the next process start tries
+  again.
+
+Not provable by the test, by design: an empty table, or a partial index no row
+matches, never gets statistics, so each start analyses it again (free). A user
+without SELECT rights on the index columns may not see its `pg_stats` rows and
+also re-analyses on each start.
+
+`prepare()` calls it after the DDL of every shard has committed and the registry
+lock is released, for the runtime and the history table. Because the registry
+miss is the trigger, a table is checked the first time a process uses it, not at
+start. Two pods may analyse the same table; that is harmless.
+
+Tests: `analyze_internal_test.go` (SQLite and a recording fake driver),
+`analyze_prepare_test.go`, and `analyze_postgres_test.go` (needs
+`CONV_TEST_POSTGRES_DSN` and a linked `postgres` or `pgx` driver; skipped
+otherwise).
 
 ### Where Builder Pattern
 [where.go](where.go)
@@ -924,6 +970,9 @@ Contract:
   uses, so the index expression equals the queried expression.
 - **Index names** are sanitised and always carry a hash suffix (≤63 chars), so keys
   that sanitise to the same text (`a.b` vs `a_b`) never collide.
+- **Planner statistics.** After the DDL commits, `prepare()` analyses the table once
+  if one of its expression indexes has none (see [Planner Statistics for
+  Expression Indexes](#planner-statistics-for-expression-indexes)).
 - **Scalar leaf fields only** — btree has an index-entry size limit; do not index a
   whole nested object.
 - **Raw SQL must compare the indexed expression.** `"object"->'k' = to_jsonb($1::text)`

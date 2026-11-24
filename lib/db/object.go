@@ -199,6 +199,15 @@ func (os *objectSet[objT, idT, shardKeyT]) prepare() (err error) {
 		return // object already registered for that vault
 	}
 
+	// Registered last-in-first-out before the unlock below, so it runs after
+	// the registry lock is released and never holds up other first uses.
+	registered := false
+	defer func() {
+		if registered && err == nil {
+			analyzeAfterPrepare(tenantDBs, os.table.RuntimeTableName, os.table.HistoryTableName)
+		}
+	}()
+
 	typeToTableMu.Lock()
 	defer typeToTableMu.Unlock()
 
@@ -283,6 +292,7 @@ ON "` + runtimeTableName + `" USING gin ("text_search");
 		typeToTable[os.vault] = map[reflect.Type]dbTable{}
 	}
 	typeToTable[os.vault][os.objType] = os.table
+	registered = true
 
 	return
 }

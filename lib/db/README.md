@@ -500,6 +500,31 @@ is a JSON string; `->>` also matches a number or boolean that prints like the
 parameter. `->>` stays correct in `SELECT` lists, `GROUP BY` and on `_history`
 tables, which carry no field indexes.
 
+## Planner Statistics for Expression Indexes
+
+Postgres collects statistics for an index on an expression, such as the btree
+indexes `WithIndexes` creates, only when its table is analysed after the index
+exists. Without them the planner guesses, and one query shape can scan the whole
+table. Nothing fails, so it goes unnoticed.
+
+After the first use of a table in a process, convention checks the table it just
+prepared (and its history table): if a valid expression index has no statistics,
+it runs one `ANALYZE` on that table. It runs after the schema changes have
+committed, with a 2 s lock timeout and a 30 s statement timeout, and it never
+makes the prepare fail: a problem is logged as a warning and the next start tries
+again. An empty table, or a partial index that matches no row, has no statistics
+to find, so it is analysed again at each start, which costs nothing.
+
+If your service creates an expression index itself (a GIN index, a cast, a
+partial index), call the same check afterwards:
+
+```go
+err := db.AnalyzeTablesMissingExpressionStats(ctx, sqlDB, "chat")
+```
+
+It always returns `nil`, does nothing on SQLite, and is safe to call from several
+pods at once.
+
 ## Configuration
 
 Database connections are configured via the config system (typically `.secret` directory):
