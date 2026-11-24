@@ -232,6 +232,28 @@ func Test_analyze_postgres_lockedTableTimesOutWithWarningAndStaysUsable(t *testi
 	pgTable(t, db, "pg_an_locked", 100)
 	pgExec(t, db, `CREATE INDEX "pg_an_locked_idx" ON "pg_an_locked" (("object"->'k'))`)
 
+	// With two connections the blocker holds one, so the check runs on the other
+	// and that same idle connection answers every SHOW below.
+	db.SetMaxOpenConns(2)
+	pgSetting := func(name string) string {
+		t.Helper()
+		var v string
+		if err := db.QueryRow(`SHOW ` + name).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	wantLock, wantStmt := pgSetting("lock_timeout"), pgSetting("statement_timeout")
+	assertSettings := func(when string) {
+		t.Helper()
+		if got := pgSetting("lock_timeout"); got != wantLock {
+			t.Errorf("lock_timeout leaked %s: %q, want %q", when, got, wantLock)
+		}
+		if got := pgSetting("statement_timeout"); got != wantStmt {
+			t.Errorf("statement_timeout leaked %s: %q, want %q", when, got, wantStmt)
+		}
+	}
+
 	tx, err := db.Begin()
 	if err != nil {
 		t.Fatal(err)
@@ -252,6 +274,7 @@ func Test_analyze_postgres_lockedTableTimesOutWithWarningAndStaysUsable(t *testi
 	if !strings.Contains(logs.String(), `"level":"WARN"`) {
 		t.Errorf("no warning logged: %s", logs.String())
 	}
+	assertSettings("after the timed-out check")
 	if err := tx.Rollback(); err != nil {
 		t.Fatal(err)
 	}
@@ -260,16 +283,13 @@ func Test_analyze_postgres_lockedTableTimesOutWithWarningAndStaysUsable(t *testi
 	if err := db.QueryRow(`SELECT count(*) FROM "pg_an_locked"`).Scan(&n); err != nil || n != 100 {
 		t.Fatalf("table unusable: n=%d err=%v", n, err)
 	}
-	var setting string
-	if err := db.QueryRow(`SHOW lock_timeout`).Scan(&setting); err != nil || setting != "0" {
-		t.Errorf("lock_timeout leaked to the pool: %q %v", setting, err)
-	}
 	if err := convDB.AnalyzeTablesMissingExpressionStats(ctx, db, "pg_an_locked"); err != nil {
 		t.Fatal(err)
 	}
 	if !pgHasStats(t, db, "pg_an_locked_idx") {
 		t.Error("next run did not analyse the table")
 	}
+	assertSettings("after the retry")
 }
 
 type PgAnalyzeA struct {
