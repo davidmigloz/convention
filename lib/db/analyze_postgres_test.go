@@ -348,3 +348,26 @@ VALUES ($1, now(), 'u', now(), 'u', jsonb_build_object('k','v','tags',jsonb_buil
 		t.Fatalf("hand-made index has no statistics; logs: %s", logs.String())
 	}
 }
+
+func Test_analyze_postgres_schemaQualifiedTableIsAnalysed(t *testing.T) {
+	db := pgOpen(t)
+	ctx, logs := pgCtx()
+
+	pgExec(t, db, `DROP SCHEMA IF EXISTS "pg_an_schema" CASCADE`)
+	pgExec(t, db, `CREATE SCHEMA "pg_an_schema"`)
+	t.Cleanup(func() { db.Exec(`DROP SCHEMA IF EXISTS "pg_an_schema" CASCADE`) })
+	pgExec(t, db, `CREATE TABLE "pg_an_schema"."pg_an_q" ("id" text PRIMARY KEY, "object" JSONB NULL)`)
+	pgExec(t, db, `INSERT INTO "pg_an_schema"."pg_an_q" ("id","object")
+SELECT g::text, jsonb_build_object('k', 'v' || (g % 10)) FROM generate_series(1, 200) g`)
+	pgExec(t, db, `CREATE INDEX "pg_an_q_idx" ON "pg_an_schema"."pg_an_q" (("object"->'k'))`)
+	if pgHasStats(t, db, "pg_an_q_idx") {
+		t.Fatal("index has statistics before the call")
+	}
+
+	if err := convDB.AnalyzeTablesMissingExpressionStats(ctx, db, "pg_an_schema.pg_an_q"); err != nil {
+		t.Fatal(err)
+	}
+	if !pgHasStats(t, db, "pg_an_q_idx") {
+		t.Fatalf("no statistics after the call; logs: %s", logs.String())
+	}
+}

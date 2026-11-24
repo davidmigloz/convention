@@ -259,3 +259,30 @@ func Test_analyze_noTablesSendsNothing(t *testing.T) {
 		t.Fatalf("statements sent for no tables: %v", got)
 	}
 }
+
+func Test_quoteRelation(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"events", `"events"`},
+		{"tenant_a.events", `"tenant_a"."events"`},
+		{`we"ird`, `"we""ird"`},
+		{`sch"ema.ta"ble`, `"sch""ema"."ta""ble"`},
+		{"a.b.c", `"a"."b.c"`},
+	}
+	for _, c := range cases {
+		if got := quoteRelation(c.in); got != c.want {
+			t.Errorf("quoteRelation(%q) = %s, want %s", c.in, got, c.want)
+		}
+	}
+}
+
+func Test_analyze_schemaQualifiedTableUsesSameRelationInQueryAndStatement(t *testing.T) {
+	f := &fakePG{missing: map[string]bool{`"tenant_a"."events"`: true}}
+	ctx, _ := logCtx()
+
+	_ = AnalyzeTablesMissingExpressionStats(ctx, newFakePG(f), "tenant_a.events")
+
+	got := strings.Join(f.snapshot(), "\n")
+	if !strings.Contains(got, `query: "tenant_a"."events"`) || !strings.Contains(got, `exec: ANALYZE "tenant_a"."events"`) {
+		t.Fatalf("relation not schema-qualified:\n%s", got)
+	}
+}
