@@ -248,8 +248,8 @@ start. Two pods may analyse the same table; that is harmless.
 
 Tests: `analyze_internal_test.go` (SQLite and a recording fake driver),
 `analyze_prepare_test.go`, and `analyze_postgres_test.go` (needs
-`CONV_TEST_POSTGRES_DSN` and a linked `postgres` or `pgx` driver; skipped
-otherwise).
+`CONV_TEST_POSTGRES_DSN`; the `lib/pq` driver is linked by
+`postgres_driver_test.go`; skipped otherwise).
 
 ### Where Builder Pattern
 [where.go](where.go)

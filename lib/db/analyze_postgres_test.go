@@ -18,9 +18,8 @@ import (
 // These tests need a throwaway Postgres: set CONV_TEST_POSTGRES_DSN to a
 // libpq connection string (for example
 // "host=localhost port=5432 user=u password=p dbname=scratch sslmode=disable").
-// The module does not depend on a Postgres driver, so the test binary must
-// link one under the name "postgres" or "pgx" (a temporary blank import in an
-// untracked _test.go file is enough). They create and drop their own tables.
+// The test binary links lib/pq (postgres_driver_test.go). They create and drop
+// their own tables.
 
 const pgDSNEnv = "CONV_TEST_POSTGRES_DSN"
 
