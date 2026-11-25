@@ -244,7 +244,11 @@ also re-analyses on each start.
 `prepare()` calls it after the DDL of every shard has committed and the registry
 lock is released, for the runtime and the history table. Because the registry
 miss is the trigger, a table is checked the first time a process uses it, not at
-start. Two pods may analyse the same table; that is harmless.
+start. Two pods may analyse the same table; that is harmless. While one pod's
+`ANALYZE` holds `SHARE UPDATE EXCLUSIVE`, another pod's prepare DDL waits for it:
+`CREATE INDEX IF NOT EXISTS` takes `SHARE` on the table even when the index
+exists. Writes to the table (`ROW EXCLUSIVE`) queue behind that waiting DDL, for
+at most `analyzeStatementTimeout`.
 
 Tests: `analyze_internal_test.go` (SQLite and a recording fake driver),
 `analyze_prepare_test.go`, and `analyze_postgres_test.go` (needs

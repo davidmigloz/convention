@@ -526,7 +526,10 @@ A table is named `table` (resolved through the search path) or `schema.table`;
 each part is quoted, so the name is split on the first `.`.
 
 It returns nothing, does nothing on SQLite, and is safe to call from several pods
-at once.
+at once. While its `ANALYZE` runs, another process's first use of the same table
+waits for it, because that process's `CREATE INDEX IF NOT EXISTS` locks the table
+even when the index exists. Writes to the table then wait behind that process,
+for at most the 30 s statement timeout.
 
 ## Configuration
 
