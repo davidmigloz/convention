@@ -519,14 +519,14 @@ If your service creates an expression index itself (a GIN index, a cast, a
 partial index), call the same check afterwards:
 
 ```go
-err := db.AnalyzeTablesMissingExpressionStats(ctx, sqlDB, "chat")
+db.AnalyzeTablesMissingExpressionStats(ctx, sqlDB, "chat")
 ```
 
 A table is named `table` (resolved through the search path) or `schema.table`;
 each part is quoted, so the name is split on the first `.`.
 
-It always returns `nil`, does nothing on SQLite, and is safe to call from several
-pods at once.
+It returns nothing, does nothing on SQLite, and is safe to call from several pods
+at once.
 
 ## Configuration
 

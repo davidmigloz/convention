@@ -82,16 +82,15 @@ func isSQLiteDB(db *sql.DB) bool {
 // SET LOCAL lock_timeout and statement_timeout (analyzeLockTimeout,
 // analyzeStatementTimeout), so nothing leaks to the pooled connection and a
 // busy table is given up on, not waited for. Every failure is logged as a
-// warning and the next table is still tried; the result is always nil, so a
-// caller can never fail because of it. A table that holds no rows, or an index
-// whose predicate matches no row, stays without statistics and is analysed
-// again by the next call, which is cheap.
-func AnalyzeTablesMissingExpressionStats(ctx convCtx.Context, db *sql.DB, tables ...string) error {
+// warning and the next table is still tried; there is no result, so a caller
+// can never fail because of it. A table that holds no rows, or an index whose
+// predicate matches no row, stays without statistics and is analysed again by
+// the next call, which is cheap.
+func AnalyzeTablesMissingExpressionStats(ctx convCtx.Context, db *sql.DB, tables ...string) {
 	if db == nil || len(tables) == 0 || isSQLiteDB(db) {
-		return nil
+		return
 	}
 	analyzeMissingExpressionStats(ctx, db, tables)
-	return nil
 }
 
 func analyzeMissingExpressionStats(ctx convCtx.Context, db *sql.DB, tables []string) {

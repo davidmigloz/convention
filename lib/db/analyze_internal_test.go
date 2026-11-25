@@ -156,9 +156,7 @@ func Test_analyze_sendsExpectedStatementsPerTable(t *testing.T) {
 	f := &fakePG{missing: map[string]bool{`"entity"`: true}}
 	ctx, logs := logCtx()
 
-	if err := AnalyzeTablesMissingExpressionStats(ctx, newFakePG(f), "entity", "other"); err != nil {
-		t.Fatalf("err = %v", err)
-	}
+	AnalyzeTablesMissingExpressionStats(ctx, newFakePG(f), "entity", "other")
 
 	want := []string{
 		"begin",
@@ -189,7 +187,7 @@ func Test_analyze_quotesTableNameInQueryArgumentAndStatement(t *testing.T) {
 	f := &fakePG{missing: map[string]bool{`"we""ird"`: true}}
 	ctx, _ := logCtx()
 
-	_ = AnalyzeTablesMissingExpressionStats(ctx, newFakePG(f), `we"ird`)
+	AnalyzeTablesMissingExpressionStats(ctx, newFakePG(f), `we"ird`)
 
 	got := strings.Join(f.snapshot(), "\n")
 	if !strings.Contains(got, `query: "we""ird"`) || !strings.Contains(got, `exec: ANALYZE "we""ird"`) {
@@ -204,9 +202,7 @@ func Test_analyze_failureIsLoggedAsWarningAndNextTableStillRuns(t *testing.T) {
 	}
 	ctx, logs := logCtx()
 
-	if err := AnalyzeTablesMissingExpressionStats(ctx, newFakePG(f), "a", "b"); err != nil {
-		t.Fatalf("a failed ANALYZE must not be returned, got %v", err)
-	}
+	AnalyzeTablesMissingExpressionStats(ctx, newFakePG(f), "a", "b")
 
 	got := strings.Join(f.snapshot(), "\n")
 	if !strings.Contains(got, "rollback") {
@@ -220,13 +216,11 @@ func Test_analyze_failureIsLoggedAsWarningAndNextTableStillRuns(t *testing.T) {
 	}
 }
 
-func Test_analyze_catalogQueryFailureIsLoggedAndReturnsNil(t *testing.T) {
+func Test_analyze_catalogQueryFailureIsLoggedAndSendsNoAnalyze(t *testing.T) {
 	f := &fakePG{queryErr: errors.New("permission denied for table pg_index")}
 	ctx, logs := logCtx()
 
-	if err := AnalyzeTablesMissingExpressionStats(ctx, newFakePG(f), "a"); err != nil {
-		t.Fatalf("err = %v", err)
-	}
+	AnalyzeTablesMissingExpressionStats(ctx, newFakePG(f), "a")
 	if strings.Contains(strings.Join(f.snapshot(), "\n"), "ANALYZE") {
 		t.Errorf("ANALYZE sent although the check failed")
 	}
@@ -243,9 +237,7 @@ func Test_analyze_isNoOpOnSQLite(t *testing.T) {
 	defer db.Close()
 	ctx, logs := logCtx()
 
-	if err := AnalyzeTablesMissingExpressionStats(ctx, db, "entity"); err != nil {
-		t.Fatalf("err = %v", err)
-	}
+	AnalyzeTablesMissingExpressionStats(ctx, db, "entity")
 	if logs.Len() != 0 {
 		t.Errorf("SQLite must be silent, got: %s", logs.String())
 	}
@@ -254,7 +246,7 @@ func Test_analyze_isNoOpOnSQLite(t *testing.T) {
 func Test_analyze_noTablesSendsNothing(t *testing.T) {
 	f := &fakePG{}
 	ctx, _ := logCtx()
-	_ = AnalyzeTablesMissingExpressionStats(ctx, newFakePG(f))
+	AnalyzeTablesMissingExpressionStats(ctx, newFakePG(f))
 	if got := f.snapshot(); len(got) != 0 {
 		t.Fatalf("statements sent for no tables: %v", got)
 	}
@@ -279,7 +271,7 @@ func Test_analyze_schemaQualifiedTableUsesSameRelationInQueryAndStatement(t *tes
 	f := &fakePG{missing: map[string]bool{`"tenant_a"."events"`: true}}
 	ctx, _ := logCtx()
 
-	_ = AnalyzeTablesMissingExpressionStats(ctx, newFakePG(f), "tenant_a.events")
+	AnalyzeTablesMissingExpressionStats(ctx, newFakePG(f), "tenant_a.events")
 
 	got := strings.Join(f.snapshot(), "\n")
 	if !strings.Contains(got, `query: "tenant_a"."events"`) || !strings.Contains(got, `exec: ANALYZE "tenant_a"."events"`) {

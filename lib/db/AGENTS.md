@@ -232,7 +232,7 @@ that creates an expression index itself can call it afterwards):
   `SET LOCAL lock_timeout` (`analyzeLockTimeout`, 2 s) and `SET LOCAL
   statement_timeout` (`analyzeStatementTimeout`, 30 s), so nothing leaks to the
   pooled connection and a failed statement cannot poison the next table.
-- logs every error as a warning through `ctx.Logger()` and always returns `nil`.
+- logs every error as a warning through `ctx.Logger()` and returns nothing.
   `prepare()` therefore succeeds exactly as before; the next process start tries
   again.
 

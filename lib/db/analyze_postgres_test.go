@@ -133,9 +133,7 @@ func Test_analyze_postgres_expressionIndexesGetStatisticsOnceAndOnlyOnce(t *test
 				t.Fatal("index has statistics before the call")
 			}
 
-			if err := convDB.AnalyzeTablesMissingExpressionStats(ctx, db, "pg_an_t"); err != nil {
-				t.Fatal(err)
-			}
+			convDB.AnalyzeTablesMissingExpressionStats(ctx, db, "pg_an_t")
 			if !pgHasStats(t, db, "pg_an_idx") {
 				t.Fatalf("no statistics after the call; logs: %s", logs.String())
 			}
@@ -145,9 +143,7 @@ func Test_analyze_postgres_expressionIndexesGetStatisticsOnceAndOnlyOnce(t *test
 			}
 
 			time.Sleep(1500 * time.Millisecond)
-			if err := convDB.AnalyzeTablesMissingExpressionStats(ctx, db, "pg_an_t"); err != nil {
-				t.Fatal(err)
-			}
+			convDB.AnalyzeTablesMissingExpressionStats(ctx, db, "pg_an_t")
 			time.Sleep(1500 * time.Millisecond)
 			second := pgLastAnalyze(t, db, "pg_an_t", true)
 			if !second.Time.Equal(first.Time) {
@@ -171,9 +167,7 @@ func Test_analyze_postgres_emptyTableAndUnmatchedPartialIndexAreAnalysedEachRunW
 	pgExec(t, db, `CREATE INDEX "pg_an_partial_idx" ON "pg_an_partial" (("object"->'k')) WHERE "object"->>'k' = 'never'`)
 
 	tables := []string{"pg_an_empty", "pg_an_partial"}
-	if err := convDB.AnalyzeTablesMissingExpressionStats(ctx, db, tables...); err != nil {
-		t.Fatalf("first run: %v", err)
-	}
+	convDB.AnalyzeTablesMissingExpressionStats(ctx, db, tables...)
 	first := map[string]time.Time{}
 	for _, tb := range tables {
 		last := pgLastAnalyze(t, db, tb, true)
@@ -183,9 +177,7 @@ func Test_analyze_postgres_emptyTableAndUnmatchedPartialIndexAreAnalysedEachRunW
 		first[tb] = last.Time
 	}
 
-	if err := convDB.AnalyzeTablesMissingExpressionStats(ctx, db, tables...); err != nil {
-		t.Fatalf("second run: %v", err)
-	}
+	convDB.AnalyzeTablesMissingExpressionStats(ctx, db, tables...)
 	for _, tb := range tables {
 		if !pgLastAnalyzeAfter(t, db, tb, first[tb]) {
 			t.Errorf("%s was not analysed again by the second run", tb)
@@ -213,9 +205,7 @@ func Test_analyze_postgres_invalidIndexIsIgnored(t *testing.T) {
 		t.Fatalf("expected an invalid index, valid=%v err=%v", valid, err)
 	}
 
-	if err := convDB.AnalyzeTablesMissingExpressionStats(ctx, db, "pg_an_invalid"); err != nil {
-		t.Fatal(err)
-	}
+	convDB.AnalyzeTablesMissingExpressionStats(ctx, db, "pg_an_invalid")
 	time.Sleep(1500 * time.Millisecond)
 	if pgLastAnalyze(t, db, "pg_an_invalid", false).Valid {
 		t.Fatal("the table was analysed because of an invalid index")
@@ -263,11 +253,8 @@ func Test_analyze_postgres_lockedTableTimesOutWithWarningAndStaysUsable(t *testi
 	}
 
 	start := time.Now()
-	err = convDB.AnalyzeTablesMissingExpressionStats(ctx, db, "pg_an_locked")
+	convDB.AnalyzeTablesMissingExpressionStats(ctx, db, "pg_an_locked")
 	elapsed := time.Since(start)
-	if err != nil {
-		t.Fatalf("a timeout must not be returned: %v", err)
-	}
 	if elapsed > 10*time.Second {
 		t.Errorf("the check waited %v for the lock", elapsed)
 	}
@@ -283,9 +270,7 @@ func Test_analyze_postgres_lockedTableTimesOutWithWarningAndStaysUsable(t *testi
 	if err := db.QueryRow(`SELECT count(*) FROM "pg_an_locked"`).Scan(&n); err != nil || n != 100 {
 		t.Fatalf("table unusable: n=%d err=%v", n, err)
 	}
-	if err := convDB.AnalyzeTablesMissingExpressionStats(ctx, db, "pg_an_locked"); err != nil {
-		t.Fatal(err)
-	}
+	convDB.AnalyzeTablesMissingExpressionStats(ctx, db, "pg_an_locked")
 	if !pgHasStats(t, db, "pg_an_locked_idx") {
 		t.Error("next run did not analyse the table")
 	}
@@ -389,9 +374,7 @@ VALUES ($1, now(), 'u', now(), 'u', jsonb_build_object('k','v','tags',jsonb_buil
 	if err != nil || len(dbsRaw) != 1 {
 		t.Fatalf("RawDBs: %v %v", dbsRaw, err)
 	}
-	if err := convDB.AnalyzeTablesMissingExpressionStats(ctx, dbsRaw[0], "pg_analyze_a", "pg_analyze_a_history"); err != nil {
-		t.Fatal(err)
-	}
+	convDB.AnalyzeTablesMissingExpressionStats(ctx, dbsRaw[0], "pg_analyze_a", "pg_analyze_a_history")
 	if !pgHasStats(t, db, "pg_analyze_a_hand") {
 		t.Fatalf("hand-made index has no statistics; logs: %s", logs.String())
 	}
@@ -412,9 +395,7 @@ SELECT g::text, jsonb_build_object('k', 'v' || (g % 10)) FROM generate_series(1,
 		t.Fatal("index has statistics before the call")
 	}
 
-	if err := convDB.AnalyzeTablesMissingExpressionStats(ctx, db, "conv_an_schema.pg_an_q"); err != nil {
-		t.Fatal(err)
-	}
+	convDB.AnalyzeTablesMissingExpressionStats(ctx, db, "conv_an_schema.pg_an_q")
 	if !pgHasStats(t, db, "pg_an_q_idx") {
 		t.Fatalf("no statistics after the call; logs: %s", logs.String())
 	}
