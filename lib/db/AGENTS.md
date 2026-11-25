@@ -237,9 +237,14 @@ that creates an expression index itself can call it afterwards):
   again.
 
 Not provable by the test, by design: an empty table, or a partial index no row
-matches, never gets statistics, so each start analyses it again (free). A user
-without SELECT rights on the index columns may not see its `pg_stats` rows and
-also re-analyses on each start.
+matches, never gets statistics, so each start analyses it again (free). An index
+has no privileges of its own, so `pg_stats` shows its rows only to the table's
+owner and to superusers: a role that does not own the table never sees them and
+analyses the table at every start. On Postgres 14 a role that owns neither the
+table nor the database has its `ANALYZE` skipped with a server `WARNING`, not an
+error, so the check then logs nothing and the statistics never appear. A table
+`prepare()` indexes cannot be in that state: its `CREATE INDEX IF NOT EXISTS`
+already requires ownership.
 
 `prepare()` calls it after the DDL of every shard has committed and the registry
 lock is released, for the runtime and the history table. Because the registry
