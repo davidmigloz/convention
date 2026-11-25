@@ -401,18 +401,18 @@ func Test_analyze_postgres_schemaQualifiedTableIsAnalysed(t *testing.T) {
 	db := pgOpen(t)
 	ctx, logs := pgCtx()
 
-	pgExec(t, db, `DROP SCHEMA IF EXISTS "pg_an_schema" CASCADE`)
-	pgExec(t, db, `CREATE SCHEMA "pg_an_schema"`)
-	t.Cleanup(func() { db.Exec(`DROP SCHEMA IF EXISTS "pg_an_schema" CASCADE`) })
-	pgExec(t, db, `CREATE TABLE "pg_an_schema"."pg_an_q" ("id" text PRIMARY KEY, "object" JSONB NULL)`)
-	pgExec(t, db, `INSERT INTO "pg_an_schema"."pg_an_q" ("id","object")
+	pgExec(t, db, `DROP SCHEMA IF EXISTS "conv_an_schema" CASCADE`)
+	pgExec(t, db, `CREATE SCHEMA "conv_an_schema"`)
+	t.Cleanup(func() { db.Exec(`DROP SCHEMA IF EXISTS "conv_an_schema" CASCADE`) })
+	pgExec(t, db, `CREATE TABLE "conv_an_schema"."pg_an_q" ("id" text PRIMARY KEY, "object" JSONB NULL)`)
+	pgExec(t, db, `INSERT INTO "conv_an_schema"."pg_an_q" ("id","object")
 SELECT g::text, jsonb_build_object('k', 'v' || (g % 10)) FROM generate_series(1, 200) g`)
-	pgExec(t, db, `CREATE INDEX "pg_an_q_idx" ON "pg_an_schema"."pg_an_q" (("object"->'k'))`)
+	pgExec(t, db, `CREATE INDEX "pg_an_q_idx" ON "conv_an_schema"."pg_an_q" (("object"->'k'))`)
 	if pgHasStats(t, db, "pg_an_q_idx") {
 		t.Fatal("index has statistics before the call")
 	}
 
-	if err := convDB.AnalyzeTablesMissingExpressionStats(ctx, db, "pg_an_schema.pg_an_q"); err != nil {
+	if err := convDB.AnalyzeTablesMissingExpressionStats(ctx, db, "conv_an_schema.pg_an_q"); err != nil {
 		t.Fatal(err)
 	}
 	if !pgHasStats(t, db, "pg_an_q_idx") {
